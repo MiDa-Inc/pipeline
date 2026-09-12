@@ -1,0 +1,5 @@
+command: herdr --session pipeline_spike6 agent wait spike_impl --until idle --timeout 5000
+exit: 0
+elapsed_ms: 7
+herdr: 0.9.0
+session: pipeline_spike6 (isolated headless server, no other agents)
