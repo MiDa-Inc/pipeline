@@ -1,0 +1,4 @@
+command: herdr pane run wA:p3 echo\ HERDR_SPIKE_MARKER_OK\;\ echo\ second\ line
+exit: 0
+elapsed_ms: 9
+herdr: 0.9.0

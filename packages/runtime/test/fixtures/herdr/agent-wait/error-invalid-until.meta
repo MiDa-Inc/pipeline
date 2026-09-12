@@ -1,0 +1,4 @@
+command: herdr agent wait wA:p3 --until not_a_state --timeout 500
+exit: 2
+elapsed_ms: 15
+herdr: 0.9.0

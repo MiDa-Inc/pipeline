@@ -1,0 +1,5 @@
+command: env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID herdr --session pipeline_spike pane current
+exit: 0
+herdr: 0.9.0
+session: pipeline_spike (isolated headless server)
+note: with the HERDR_* vars removed herdr does not fail; it falls back to the session's focused pane, which is not the caller's pane

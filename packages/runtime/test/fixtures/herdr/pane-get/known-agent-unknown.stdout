@@ -1,0 +1,1 @@
+{"id":"cli:pane:get","result":{"pane":{"agent":"claude","agent_status":"unknown","cwd":"/Users/aantonyan","focused":false,"foreground_cwd":"/Users/aantonyan","pane_id":"w1:p4","revision":0,"scroll":{"max_offset_from_bottom":0,"offset_from_bottom":0,"viewport_rows":20},"tab_id":"w1:t1","terminal_id":"term_65b4155ecd77c4","workspace_id":"w1"},"type":"pane_info"}}

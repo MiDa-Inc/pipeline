@@ -1,0 +1,5 @@
+command: herdr --session pipeline_spike agent start spike_timeout --kind claude --pane w1:p5 --timeout 500
+exit: 1
+elapsed_ms: 9
+herdr: 0.9.0
+session: pipeline_spike (isolated headless server, no other agents)

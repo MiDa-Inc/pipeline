@@ -1,0 +1,4 @@
+command: herdr agent wait spike_reviewer --until idle --timeout 2000
+exit: 1
+elapsed_ms: 2088
+herdr: 0.9.0

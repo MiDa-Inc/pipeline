@@ -1,0 +1,4 @@
+command: herdr agent explain spike_reviewer
+exit: 0
+elapsed_ms: 13
+herdr: 0.9.0

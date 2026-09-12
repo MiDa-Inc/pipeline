@@ -1,0 +1,4 @@
+command: herdr agent start spike_reviewer --kind claude --pane wA:p3 --timeout 60000
+exit: 1
+elapsed_ms: 3695
+herdr: 0.9.0

@@ -1,0 +1,4 @@
+command: herdr pane wait-output wA:p3 --match NEVER_APPEARS_XYZZY --source visible --timeout 2000
+exit: 1
+elapsed_ms: 2033
+herdr: 0.9.0

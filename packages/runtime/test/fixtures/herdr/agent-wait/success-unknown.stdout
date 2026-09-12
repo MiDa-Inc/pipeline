@@ -1,0 +1,1 @@
+{"id":"cli:agent:wait","result":{"agent":{"agent":"claude","agent_status":"unknown","cwd":"/Users/aantonyan","focused":true,"foreground_cwd":"/Users/aantonyan","pane_id":"w1:p1","revision":0,"state_change_seq":0,"tab_id":"w1:t1","terminal_id":"term_65b419c2226ff1","workspace_id":"w1"},"type":"agent_info"}}

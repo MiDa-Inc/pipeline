@@ -1,0 +1,4 @@
+command: herdr pane read wA:p3 --source visible --lines 12
+exit: 0
+elapsed_ms: 19
+herdr: 0.9.0

@@ -1,0 +1,5 @@
+command: herdr pane current   (run INSIDE isolated pane w1:p6 via `herdr pane run`, inheriting that pane's HERDR_* vars)
+exit: 0
+herdr: 0.9.0
+session: pipeline_spike (isolated headless server)
+note: w1:p6 was NOT the focused pane; compare no-herdr-env.*, where stripping HERDR_* makes the same call return the focused pane w1:p1 instead

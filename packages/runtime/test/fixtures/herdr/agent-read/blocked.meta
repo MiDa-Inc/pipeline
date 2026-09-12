@@ -1,0 +1,4 @@
+command: herdr agent read spike_reviewer --source visible --lines 20
+exit: 0
+elapsed_ms: 10
+herdr: 0.9.0

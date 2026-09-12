@@ -1,0 +1,5 @@
+command: herdr --session pipeline_spike2 agent explain w1:p2
+exit: 0
+elapsed_ms: 9
+herdr: 0.9.0
+session: pipeline_spike2 (isolated headless server, no other agents)

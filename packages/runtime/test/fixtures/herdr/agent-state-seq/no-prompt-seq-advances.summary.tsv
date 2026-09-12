@@ -1,0 +1,9 @@
+# DERIVED from no-prompt-seq-advances.stdout — not a captured command output.
+# Produced by: python3 -c "import json;[print(json.loads(l)['result']['agent']['agent_status'], json.loads(l)['result']['agent']['state_change_seq'], sep=chr(9)) for l in open(...)]"
+agent_status	state_change_seq
+idle	1
+unknown	2
+idle	3
+working	4
+blocked	5
+idle	6

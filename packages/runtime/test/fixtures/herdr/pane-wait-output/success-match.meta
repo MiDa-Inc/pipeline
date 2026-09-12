@@ -1,0 +1,4 @@
+command: herdr pane wait-output wA:p3 --match HERDR_SPIKE_MARKER_OK --source visible --timeout 3000
+exit: 0
+elapsed_ms: 16
+herdr: 0.9.0

@@ -1,0 +1,4 @@
+command: herdr pane split wA:p2 --direction right --cwd /Users/aantonyan/workspace/shshunj/pipeline --no-focus
+exit: 0
+elapsed_ms: 19
+herdr: 0.9.0

@@ -1,0 +1,19 @@
+aantonyan@Arams-Mac-Studio pipeline % echo HERDR_SPIKE_MARKER_OK; echo second line
+HERDR_SPIKE_MARKER_OK
+second line
+aantonyan@Arams-Mac-Studio pipeline % claude
+ ▐▛███▛█   Claude Code v2.1.269
+▝▜██████▀  Opus 5 (1M context) · Claude Max
+  ▝▝ ▝▝    ~/workspace/shshunj/pipeline
+
+
+❯ Reply with exactly the word PONG and nothing else.
+
+⏺ PONG
+
+✻ Worked for 2s · done 8:38 PM
+
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents                                                                /rc

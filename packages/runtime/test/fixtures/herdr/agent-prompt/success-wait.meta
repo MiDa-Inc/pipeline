@@ -1,0 +1,4 @@
+command: herdr agent prompt spike_reviewer Reply\ with\ exactly\ the\ word\ PONG\ and\ nothing\ else. --wait --timeout 120000
+exit: 0
+elapsed_ms: 2806
+herdr: 0.9.0

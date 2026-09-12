@@ -1,0 +1,4 @@
+command: /usr/bin/env -i /bin/sh -c 'env | grep -c "^HERDR" || true'
+exit: 0
+note: NOT a herdr command. Auxiliary capture: the count of HERDR_* variables visible to a process
+note: started with an empty environment. Content is the raw stdout of the command above ("0").

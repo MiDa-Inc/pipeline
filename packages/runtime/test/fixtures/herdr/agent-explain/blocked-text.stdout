@@ -1,0 +1,5 @@
+agent: claude
+state: blocked
+manifest: remote:/Users/aantonyan/.local/state/herdr/agent-detection/remote/claude.toml 2026.09.11.1
+rule: live_blocked_form (region=after_last_horizontal_rule priority=980)
+evidence: " Accessing workspace:\n\n /Users/aantonyan/workspace/shshunj/pipeline\n\n Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source\n project, or work from your team). If not, take a moment..."

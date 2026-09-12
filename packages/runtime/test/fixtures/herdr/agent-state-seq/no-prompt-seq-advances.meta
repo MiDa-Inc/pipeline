@@ -1,0 +1,13 @@
+command: for st in idle unknown idle working blocked idle; do
+command:   herdr --session pipeline_spike4 pane report-agent w1:p1 --source pipeline-spike --agent claude --state "$st"
+command:   herdr --session pipeline_spike4 agent get w1:p1
+command: done
+exit: 0
+herdr: 0.9.0
+session: pipeline_spike4 (isolated headless server, no other agents)
+stdout: the six raw `agent get` responses, one JSON envelope per line, in order. The
+stdout: `pane report-agent` calls wrote nothing (they return empty stdout) and are not in the file.
+note: NO prompt was ever sent to this pane. state_change_seq still advances on every lifecycle
+note: transition (1 -> 6), so an increase cannot be read as evidence that a submitted prompt was
+note: delivered or that a turn began. Counterexample for docs/herdr-notes.md.
+derived: no-prompt-seq-advances.summary.tsv is a DERIVED condensation of this file, not a capture.

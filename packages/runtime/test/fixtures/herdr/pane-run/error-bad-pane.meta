@@ -1,0 +1,4 @@
+command: herdr pane run wA:p999 echo\ hi
+exit: 1
+elapsed_ms: 7
+herdr: 0.9.0
