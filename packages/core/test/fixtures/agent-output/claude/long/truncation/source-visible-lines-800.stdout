@@ -1,0 +1,39 @@
+    sessionCounter = 0;
+  }
+
+  27. Date.now() and token generation aren't injectable, complicating deterministic tests (server.js:6, 29-30)
+  Symptom: created: Date.now() and 'tok_' + sessionCounter are hard-coded calls with no way to control or mock them from
+  a test without global monkey-patching (jest.spyOn(Date, 'now'), etc.).
+  Why it matters: Testing time-sensitive behavior (e.g., a future session-expiry check, per finding #13) becomes fragile
+  and coupled to global mutation of Date/crypto, rather than clean dependency injection.
+  Fix: accept a clock/ID-generator as an optional parameter (or module-level, swappable dependency) so tests can supply
+  deterministic fakes:
+  export function addUser(n, e, a, { now = Date.now } = {}) {
+    users.push({ n, e, a, created: now() });
+    return users.length;
+  }
+
+  28. No test coverage accompanies this diff at all
+  Symptom: The diff adds five new exported functions (login, getSession, listUsersByAge, exportAll, importAll) and
+  modifies the behavior of existing ones, with zero corresponding test file changes.
+  Why it matters: Given how many of the above bugs (off-by-one loop, eval RCE, predictable tokens, broken auth) are
+  exactly the sort of thing a basic unit test (findUser returns undefined for a missing user; login rejects wrong
+  passwords; importAll rejects non-JSON) would have caught before merge, the absence of tests is itself a significant
+  gap for a diff touching authentication.
+  Fix: add unit tests per function before merging, especially negative-path tests ("user not found", "wrong password",
+  "malformed import payload").
+
+  ---
+
+  Given the presence of a remote-code-execution vector (eval in importAll), broken/non-functional authentication,
+  predictable session tokens, and multiple correctness bugs that cause crashes or silent data corruption on common
+  inputs, this diff should not be merged as-is.
+
+  VERDICT: REVISE
+
+✻ Churned for 1m 59s · done 11:01 PM
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────── s04-cc-long ─
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents                                                           /rc

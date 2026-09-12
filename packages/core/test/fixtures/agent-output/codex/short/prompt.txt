@@ -1,0 +1,1 @@
+Read review-input.diff in this directory and review that change to util.js. Keep the review to a few sentences. Finish your reply with exactly one line, on its own line, either "VERDICT: APPROVE" or "VERDICT: REVISE".

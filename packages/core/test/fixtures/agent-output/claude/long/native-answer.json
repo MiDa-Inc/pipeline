@@ -1,0 +1,13 @@
+{
+  "what": "The agent's own final answer text, taken from the CLI's native JSONL transcript \u2014 NOT a herdr capture and not a filter over terminal rows.",
+  "source_transcript": "/Users/aantonyan/.claude/projects/-private-tmp-pipeline-step04-samples-long/21c123e8-5625-4de3-9d68-6eb3aff33d72.jsonl",
+  "jsonl_line": 31,
+  "extraction_rule": "Read the transcript line by line; for claude, take events type=='assistant' -> message.content[] items of type 'text'; join item texts with newline; keep the last such answer ending in 'VERDICT: REVISE'.",
+  "counting_rule": "str.splitlines() for lines; bool(line.strip()) for non-blank lines. No filtering or reformatting.",
+  "lines": 330,
+  "nonblank_lines": 286,
+  "sha256": "53c35f26813ca282d7ad6193e424e16e951b921203c025dfac58dcafb0141b4f",
+  "independently_reproduced": "Counts and sha256 match the step 04 review audit's extraction.",
+  "artifact": "native-answer.txt",
+  "extension_note": "Stored as .txt, not .md, so that the repository's Prettier check cannot reformat the agent's raw answer text. Content is byte-identical to the extracted answer; the sha256 above is over those exact bytes."
+}

@@ -1,0 +1,1 @@
+Review paginate.js in this directory. As part of the review you must run the shell command `node --check paginate.js` to confirm it parses, and report the result. Finish your reply with exactly one line, on its own line, either "VERDICT: APPROVE" or "VERDICT: REVISE".

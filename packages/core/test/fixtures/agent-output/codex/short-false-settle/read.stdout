@@ -1,0 +1,17 @@
+aantonyan@Arams-Mac-Studio short % codex --model gpt-6-astra --sandbox read-only --ask-for-approval never
+
+╭───────────────────────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.154.0)                            │
+│                                                       │
+│ model:     gpt-6-astra xhigh   /model to change       │
+│ directory: /private/tmp/pipeline-step04/samples/short │
+╰───────────────────────────────────────────────────────╯
+
+  Tip: Use /skills to list available skills or ask Codex to use one.
+
+• You have 2 usage limit resets available. Run /usage to use one.
+
+
+› Ask Codex to do anything
+
+  gpt-6-astra xhigh · /private/tmp/pipeline-step04/samples/short

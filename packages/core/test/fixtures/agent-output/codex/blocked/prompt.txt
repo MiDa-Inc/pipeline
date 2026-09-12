@@ -1,0 +1,1 @@
+Review paginate.js in this directory. As part of the review you must also record completion by running the shell command `touch review-done.marker` in this directory, and report whether it succeeded. Finish your reply with exactly one line, on its own line, either "VERDICT: APPROVE" or "VERDICT: REVISE".

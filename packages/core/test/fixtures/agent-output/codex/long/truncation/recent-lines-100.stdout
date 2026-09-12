@@ -1,0 +1,100 @@
+     Symptom: Syntax failures, non-iterable values, and evaluated-code failures escape as different incidental
+     exceptions.
+     Successful import returns undefined, providing no count or structured outcome.
+     Why it matters: Callers cannot reliably distinguish malformed input, schema rejection, conflicts, and
+     infrastructure failure.
+     Raw parser details may also be inappropriate for an external response.
+     Fix: Define error codes and normalize expected parsing failures while retaining the internal cause.
+
+     function parseImport(json) {
+       if (typeof json !== 'string') {
+         throw Object.assign(new TypeError('Expected a JSON string'), {
+           code: 'INVALID_IMPORT_TYPE',
+         });
+       }
+       try {
+         return JSON.parse(json);
+       } catch (cause) {
+         if (!(cause instanceof SyntaxError)) throw cause;
+         throw Object.assign(new Error('Invalid JSON', { cause }), {
+           code: 'INVALID_JSON',
+         });
+       }
+     }
+
+     Give schema and conflict failures their own codes, and return a documented import result.
+     Do not broadly catch every failure and report success or an empty import.
+     Regression check: Each expected failure category has a stable code and preserves state.
+
+  34. Abbreviated names and inconsistent declarations obscure the data contract.
+     Location: server.js:5, also lines 10–12 and 40–43.
+     Status: Low-priority maintainability concern; partly inherited.
+
+     Symptom: Names such as n, e, a, u, and p require readers to reconstruct their meaning.
+     Newly expanded code continues using var for block-local variables, and n: n repeats identifiers unnecessarily.
+     Why it matters: The same user shape now crosses authentication, serialization, and import boundaries.
+     Clear names and documented shapes make mismatches such as the absent password field easier to notice.
+     Fix: Use descriptive parameter names, block-scoped declarations, and schema documentation.
+
+     /**
+      * @typedef {{ n: string, e: string, a: number, created: number }} UserProfile
+      */
+
+     export function addUser(name, email, age) {
+       const profile = validateProfile(name, email);
+       const user = { ...profile, a: requireAge(age), created: now() };
+       users.push(user);
+       return toPublicUser(user);
+     }
+
+     Preserve existing serialized keys unless a deliberate schema migration changes them.
+     This style concern is not, by itself, a reason to reject the change.
+     Regression check: Any naming cleanup should preserve the declared public schema and behavior.
+
+  35. No regression tests accompany the new authentication and import behavior.
+     Location: review-input.diff, entire change.
+     Status: New coverage gap; no tests were supplied.
+
+     Symptom: The patch adds authentication, sessions, filtering, serialization, and executable imports without tests.
+     Several defects are reachable with one or two calls.
+     Why it matters: Happy-path testing alone would miss missing-user deletion, missing-password login, prototype
+     lookups, expired sessions, and failed-import mutation.
+     Fix: Add behavioral tests around the corrected factory and its documented contracts.
+
+     import test from 'node:test';
+     import assert from 'node:assert/strict';
+
+     test('deleting an unknown user preserves the dataset', () => {
+       const service = createUserService();
+       service.addUser('Alice', 'alice@example.com', 30);
+       const before = service.exportAll();
+
+       assert.equal(service.deleteUser('missing@example.com'), false);
+       assert.equal(service.exportAll(), before);
+     });
+
+     test('executable import syntax is rejected without mutation', () => {
+       const service = createUserService();
+       const before = service.exportAll();
+
+       assert.throws(
+         () => service.importAll('(() => [])()'),
+         { code: 'INVALID_JSON' },
+       );
+       assert.equal(service.exportAll(), before);
+     });
+
+     Add the regression checks specified in the other findings, especially missing credentials, session revocation,
+     detached return objects, import atomicity, and boundary validation.
+     Inject time and token generation so expiration and issuance behavior can be tested deterministically.
+     The checks I ran confirmed the current defects; they do not constitute a passing regression suite for a repaired
+     implementation.
+
+  VERDICT: REVISE
+
+─ Worked for 12m 18s ───────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+› Ask Codex to do anything
+
+  gpt-6-astra xhigh · /private/tmp/pipeline-step04/samples/long · Review server.js changes

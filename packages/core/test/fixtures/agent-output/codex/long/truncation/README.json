@@ -1,0 +1,57 @@
+{
+  "what": "Window sweep for the Codex long review (agent s04_cx_long, pane 120x40).",
+  "captured": "2026-09-11, herdr 0.9.0, isolated session pipeline_s04, after the turn settled",
+  "raw": "each .stdout is the unmodified stdout of the command recorded for it",
+  "note": "1600/3000/5000 share one sha256, which is how the 1000-line ceiling was established.",
+  "not_collected": "A source comparison (visible / recent-unwrapped) was NOT captured for Codex before the session was torn down. The source recommendation is therefore supported by the Claude long review only.",
+  "captures": {
+    "recent-lines-100.stdout": {
+      "command": "herdr --session pipeline_s04 agent read s04_cx_long --source recent --lines 100",
+      "returned_lines": 100,
+      "anchored_verdict_lines": 1,
+      "sha256_16": "b9255e44551fd67c",
+      "chars": 4693,
+      "bytes": 4901
+    },
+    "recent-lines-400.stdout": {
+      "command": "herdr --session pipeline_s04 agent read s04_cx_long --source recent --lines 400",
+      "returned_lines": 400,
+      "anchored_verdict_lines": 1,
+      "sha256_16": "e7265999080ca271",
+      "chars": 18535,
+      "bytes": 18767
+    },
+    "recent-lines-800.stdout": {
+      "command": "herdr --session pipeline_s04 agent read s04_cx_long --source recent --lines 800",
+      "returned_lines": 800,
+      "anchored_verdict_lines": 1,
+      "sha256_16": "b430752c067e5795",
+      "chars": 37168,
+      "bytes": 37418
+    },
+    "recent-lines-1600.stdout": {
+      "command": "herdr --session pipeline_s04 agent read s04_cx_long --source recent --lines 1600",
+      "returned_lines": 1000,
+      "anchored_verdict_lines": 1,
+      "sha256_16": "bccd404a97123860",
+      "chars": 47355,
+      "bytes": 48541
+    },
+    "recent-lines-3000.stdout": {
+      "command": "herdr --session pipeline_s04 agent read s04_cx_long --source recent --lines 3000",
+      "returned_lines": 1000,
+      "anchored_verdict_lines": 1,
+      "sha256_16": "bccd404a97123860",
+      "chars": 47355,
+      "bytes": 48541
+    },
+    "recent-lines-5000.stdout": {
+      "command": "herdr --session pipeline_s04 agent read s04_cx_long --source recent --lines 5000",
+      "returned_lines": 1000,
+      "anchored_verdict_lines": 1,
+      "sha256_16": "bccd404a97123860",
+      "chars": 47355,
+      "bytes": 48541
+    }
+  }
+}

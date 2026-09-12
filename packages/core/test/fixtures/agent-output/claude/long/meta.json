@@ -1,0 +1,125 @@
+{
+  "sample": "claude/long",
+  "target": "s04_cc_long2",
+  "prompt": "Read review-input.diff in this directory. Do a thorough line-by-line code review of that change to server.js, covering correctness, security, error handling, API design, style and testability. Write a numbered finding for every problem, and for each give the symptom, why it matters, and a concrete fix with example code. Be exhaustive and verbose: your review must be at least 200 lines long. Finish your reply with exactly one line, on its own line, either \"VERDICT: APPROVE\" or \"VERDICT: REVISE\".",
+  "prompt_submitted_at": "22:59:35.520",
+  "prompt_returned_at": "23:01:34.629",
+  "prompt_exit": 0,
+  "prompt_timeout_ms": 900000,
+  "seconds_prompt_to_return": 119.109,
+  "seconds_to_first_settled_observed": 119.387,
+  "first_settled_state_observed": "done",
+  "poll_interval_s": 0.5,
+  "observed_states_sampled": [
+    {
+      "ts": "22:59:35.527",
+      "t": 0.007,
+      "agent_status": "idle",
+      "state_change_seq": 26
+    },
+    {
+      "ts": "22:59:36.039",
+      "t": 0.519,
+      "agent_status": "working",
+      "state_change_seq": 27
+    },
+    {
+      "ts": "23:01:34.907",
+      "t": 119.387,
+      "agent_status": "done",
+      "state_change_seq": 28
+    }
+  ],
+  "read_command": "herdr --session pipeline_s04 agent read s04_cc_long2 --source recent --lines 400",
+  "read_at": "23:01:36.636",
+  "read_exit": 0,
+  "read_later_at": "23:01:41.670",
+  "read_later_exit": 0,
+  "note_sampling": "states polled every 0.5s; transitions shorter than the interval can be missed. This is a sample, not a complete event history.",
+  "category": "long review (200+ lines)",
+  "agent": "claude",
+  "agent_version": "2.1.269 (Claude Code)",
+  "model": "sonnet (resolved claude-sonnet-5)",
+  "herdr_version": "0.9.0",
+  "herdr_session": "pipeline_s04 (isolated headless server)",
+  "pane_geometry": {
+    "rect_width": 120,
+    "rect_height": 40,
+    "shell_cols": 119,
+    "shell_rows": 40
+  },
+  "platform": "macOS 26.5.2 arm64",
+  "launch_command": "claude --model sonnet --restricted --strict-mcp-config --tools \"Read,Glob,Grep\" --permission-mode acceptEdits --name <s04-cc-SAMPLE>",
+  "input_diff": "input.diff",
+  "prompt_file": "prompt.txt",
+  "expected_verdict": "revise",
+  "expected_verdict_basis": "Agent's own answer ends with 'VERDICT: REVISE'; taken from the final line of its reply, not from the prompt text.",
+  "verdict_line_matches_in_capture": 1,
+  "turn_total_lines_in_scrollback": 406,
+  "truncation_sweep": {
+    "method": "herdr --session pipeline_s04 agent read s04_cc_long2 --source recent --lines N",
+    "results": {
+      "100": {
+        "lines": 100,
+        "beginning": false,
+        "finding_1": false,
+        "verdict": true
+      },
+      "200": {
+        "lines": 200,
+        "beginning": false,
+        "finding_1": false,
+        "verdict": true
+      },
+      "400": {
+        "lines": 400,
+        "beginning": false,
+        "finding_1": true,
+        "verdict": true
+      },
+      "800": {
+        "lines": 406,
+        "beginning": true,
+        "finding_1": true,
+        "verdict": true
+      },
+      "1600": {
+        "lines": 406,
+        "beginning": true,
+        "finding_1": true,
+        "verdict": true
+      }
+    },
+    "sources_at_800": {
+      "visible": 39,
+      "recent": 406,
+      "recent-unwrapped": 405
+    },
+    "note": "406 lines is the whole turn; 800 and 1600 return the same content, so nothing more exists to fetch.",
+    "sources_note": "recent-unwrapped differs from recent only by joining the wrapped two-row shell launch command and one trailing-space difference; the whole review and the verdict survive in both."
+  },
+  "read_chars": 23853,
+  "read_later_chars": 23853,
+  "read_bytes": 24347,
+  "read_later_bytes": 24347,
+  "units_note": "read_chars / read_later_chars are Unicode character counts (Python len of the decoded text); read_bytes / read_later_bytes are the UTF-8 file sizes. An earlier revision mislabelled the character counts as bytes.",
+  "seconds_prompt_return_to_first_read": 2.007,
+  "seconds_first_read_to_second_read": 5.034,
+  "read_timing_note": "The harness sleeps ~2 s after agent prompt returns (to finish polling) before the first read, then ~5 s more before the second. No capture was taken immediately at settle, so nothing here establishes whether an immediate read is complete.",
+  "native_answer_lines": {
+    "source": "the CLI's own JSONL transcript, not a herdr capture",
+    "artifact": "native-answer.txt",
+    "provenance": "native-answer.json",
+    "counting_rule": "str.splitlines(); non-blank via bool(line.strip())",
+    "lines": 330,
+    "nonblank_lines": 286,
+    "meets_200_line_requirement": true
+  },
+  "rendered_rows": {
+    "source": "herdr agent read --source recent-unwrapped",
+    "counting_rule": "rows between the echoed prompt and the verdict line, inclusive of the verdict",
+    "rows": 391,
+    "nonblank_rows": 343,
+    "note": "Includes herdr-rendered tool and status rows and reflects terminal wrapping; not the agent's own line breaks. Not comparable with native_answer_lines."
+  }
+}

@@ -1,0 +1,11 @@
+aantonyan@Arams-Mac-Studio long % claude --model sonnet --restricted --strict-mcp-config --tools Read,Glob,Grep --permis
+sion-mode acceptEdits --name s04-cc-long
+ ▐▛███▛█   Claude Code v2.1.269
+▝▜██████▀  Sonnet 5 · Claude Max
+  ▝▝ ▝▝    /private/tmp/pipeline-step04/samples/long
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────── s04-cc-long ─
+❯ Try "write a test for <filepath>"
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents                                                           /rc

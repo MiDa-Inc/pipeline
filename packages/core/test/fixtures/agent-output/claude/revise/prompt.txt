@@ -1,0 +1,17 @@
+Review this change to paginate.js, a pagination helper where page numbers are 1-based in the new code. Report any correctness bugs.
+
+```diff
+diff --git a/paginate.js b/paginate.js
+index c9c478c..63415c5 100644
+--- a/paginate.js
++++ b/paginate.js
+@@ -1,4 +1,4 @@
+ export function page(items, pageNum, size) {
+-  const start = pageNum * size;
+-  return items.slice(start, start + size);
++  const start = (pageNum - 1) * size;
++  return items.slice(start, start + size + 1);
+ }
+```
+
+Finish your reply with exactly one line, on its own line, either "VERDICT: APPROVE" or "VERDICT: REVISE".

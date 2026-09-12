@@ -1,0 +1,100 @@
+  21. login's return shape and getSession's return shape aren't validated/typed, and there's no way to invalidate one
+  session without wiping all (server.js:26-34, 36-38)
+  Symptom: The public contract for a "session" is implicit ({ email, token } from login, but getSession returns whatever
+  is stored, including future extra fields) and there is no logout, listSessions, or revokeAllSessions API.
+  Why it matters: Beyond the security implications already covered (findings #9, #13), this is a lifecycle gap in the
+  API surface: consumers can create sessions but have no supported way to manage them, forcing ad hoc workarounds (e.g.,
+  directly mutating the exported module internals, which aren't even exposed).
+  Fix: round out the session API with logout(id), and consider returning only the fields a client actually needs from
+  login (i.e., not re-deriving email server-side from something the client already knows).
+
+  22. Inconsistent mutability contract: listUsersByAge and findUser return live references into internal state
+  (server.js:10-14, 40-46)
+  Symptom: Both functions return the actual objects stored in the users array, not copies.
+  Why it matters: Any caller can do findUser(email).a = 999 and silently mutate internal server state without going
+  through updateAge (bypassing any validation added per finding #16). This breaks encapsulation and makes the module's
+  true mutation surface impossible to reason about or audit.
+  Fix: return shallow copies for read APIs:
+  export function findUser(e) {
+    const u = users.find((x) => x.e === e);
+    return u ? { ...u } : undefined;
+  }
+
+  Style
+
+  23. Inconsistent variable declarations: var mixed with const/let (server.js:11, 41)
+  Symptom: findUser and listUsersByAge still use for (var i = ...) while the rest of the new code uses const/let.
+  Why it matters: var is function-scoped (not block-scoped), which is a common source of subtle closure bugs, and mixing
+  styles within one file signals the change wasn't fully cleaned up/reviewed for consistency, which erodes confidence
+  in the rest of the diff.
+  Fix: use for...of with Array.prototype methods (also resolves findings #1 and #5), or at minimum switch to let.
+
+  24. Verbose object construction instead of ES6 shorthand (server.js:6)
+  Symptom: { n: n, e: e, a: a, created: Date.now() } repeats each identifier instead of using property shorthand.
+  Why it matters: Minor, but it's needless noise; shorthand is the established convention in modern JS and makes
+  diffs/reviews faster to read.
+  Fix: { n, e, a, created: Date.now() }.
+
+  25. No JSDoc or type annotations on any exported function (server.js: entire file)
+  Symptom: None of addUser, findUser, login, etc. document parameter types, return types, or failure modes (throws vs.
+  returns null/undefined).
+  Why it matters: This is a small, security-sensitive module (auth, session tokens) with an all-exported public surface;
+  consumers integrating with it have to read the source to learn behavior like "returns undefined if not found" vs.
+  "throws," which is exactly the kind of ambiguity that produced findings #1–#3.
+  Fix: add JSDoc at minimum:
+  /**
+   * @param {string} email
+   * @returns {{n:string,e:string,a:number}|undefined}
+   */
+  export function findUser(email) { /* ... */ }
+
+  Testability
+
+  26. Module-level mutable singletons (users, sessions, sessionCounter) make unit tests order-dependent and hard to
+  isolate (server.js:1-3)
+  Symptom: There is no exported reset/teardown function. Every test that calls addUser, login, etc. permanently mutates
+  shared module state for the lifetime of the process/test file.
+  Why it matters: Tests can't run in isolation or in parallel without interfering with each other (e.g., a test
+  asserting users.length === 1 will fail if a prior test already added users), forcing brittle ordering assumptions or
+  manual state cleanup hacks in every test file that imports this module.
+  Fix: expose a reset hook for tests, or better, wrap state in a factory function that tests can instantiate fresh:
+    sessions.clear();
+    sessionCounter = 0;
+  }
+
+  27. Date.now() and token generation aren't injectable, complicating deterministic tests (server.js:6, 29-30)
+  Symptom: created: Date.now() and 'tok_' + sessionCounter are hard-coded calls with no way to control or mock them from
+  a test without global monkey-patching (jest.spyOn(Date, 'now'), etc.).
+  Why it matters: Testing time-sensitive behavior (e.g., a future session-expiry check, per finding #13) becomes fragile
+  and coupled to global mutation of Date/crypto, rather than clean dependency injection.
+  Fix: accept a clock/ID-generator as an optional parameter (or module-level, swappable dependency) so tests can supply
+  deterministic fakes:
+  export function addUser(n, e, a, { now = Date.now } = {}) {
+    users.push({ n, e, a, created: now() });
+    return users.length;
+  }
+
+  28. No test coverage accompanies this diff at all
+  Symptom: The diff adds five new exported functions (login, getSession, listUsersByAge, exportAll, importAll) and
+  modifies the behavior of existing ones, with zero corresponding test file changes.
+  Why it matters: Given how many of the above bugs (off-by-one loop, eval RCE, predictable tokens, broken auth) are
+  exactly the sort of thing a basic unit test (findUser returns undefined for a missing user; login rejects wrong
+  passwords; importAll rejects non-JSON) would have caught before merge, the absence of tests is itself a significant
+  gap for a diff touching authentication.
+  Fix: add unit tests per function before merging, especially negative-path tests ("user not found", "wrong password",
+  "malformed import payload").
+
+  ---
+
+  Given the presence of a remote-code-execution vector (eval in importAll), broken/non-functional authentication,
+  predictable session tokens, and multiple correctness bugs that cause crashes or silent data corruption on common
+  inputs, this diff should not be merged as-is.
+
+  VERDICT: REVISE
+
+✻ Churned for 1m 59s · done 11:01 PM
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────── s04-cc-long ─
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents                                                           /rc

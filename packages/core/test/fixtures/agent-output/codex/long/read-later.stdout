@@ -1,0 +1,400 @@
+
+     Symptom: The public API can create and retrieve sessions but cannot invalidate one.
+     Why it matters: A caller cannot implement effective server-side logout or revoke a disclosed credential.
+     Removing a client’s copy does not remove the server record.
+     Fix: Add explicit revocation and reuse account-wide revocation for credential changes. Server-side invalidation is
+     part of session termination. OWASP session management
+     (https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html)
+
+     export function logout(token) {
+       if (typeof token !== 'string') return false;
+       return sessions.delete(token);
+     }
+
+     function onPasswordChanged(userId) {
+       revokeUserSessions(userId);
+     }
+
+     Apply the chosen policy to all sessions or explicitly preserve only the currently reauthenticated session.
+     Regression check: A logged-out token fails immediately, and repeated logout is harmless.
+
+  22. Session creation grows memory without a limit or cleanup policy.
+     Location: server.js:30.
+     Status: New resource-management defect.
+
+     Symptom: Every successful login adds an entry, including repeated logins for the same account.
+     Nothing removes entries.
+     Why it matters: Memory consumption grows with total historical successful logins.
+     Adding lookup-time expiration alone would still retain expired sessions that nobody looks up again.
+     Fix: Prune expired records independently of lookup and impose explicit global and per-account limits.
+
+     function checkSessionCapacity(userId) {
+       pruneExpiredSessions(now());
+
+       let accountCount = 0;
+       for (const session of sessions.values()) {
+         if (session.userId === userId) accountCount++;
+       }
+
+       if (sessions.size >= maximumSessions ||
+           accountCount >= maximumSessionsPerUser) {
+         throw new Error('SESSION_LIMIT_REACHED');
+       }
+     }
+
+     Invoke this before insertion; coordinate limits atomically if storage becomes shared.
+     Regression check: Repeated logins stay bounded, and expired sessions release capacity without being individually
+     queried.
+
+  23. Age queries silently accept invalid bounds.
+     Location: server.js:40, lines 40–43.
+     Status: New correctness and error-contract defect.
+
+     Symptom: Reversed bounds and NaN return empty results.
+     Numeric strings are coerced, and missing bounds also silently exclude records.
+     Why it matters: A malformed request becomes indistinguishable from a valid query with no matches.
+     Fix: Validate bounds before scanning.
+
+     function validateRange(min, max) {
+       if (!Number.isFinite(min) || !Number.isFinite(max)) {
+         throw new TypeError('Age bounds must be finite numbers');
+       }
+       if (min > max) {
+         throw new RangeError('Minimum age must not exceed maximum age');
+       }
+     }
+
+     If omitted bounds or infinity are intended features, define those alternatives explicitly.
+     Regression check: Cover strings, missing values, NaN, infinities, and reversed bounds.
+
+  24. Range-boundary semantics are unspecified and currently exclusive.
+     Location: server.js:43.
+     Status: New API ambiguity; not a proven inclusive-range requirement.
+
+     Symptom: A query from 18 to 65 excludes users aged exactly 18 and 65.
+     A query with equal bounds always returns an empty array.
+     Why it matters: Callers cannot infer whether “min” and “max” include the endpoints.
+     Either convention can be valid, but it must be documented and tested.
+     Fix: Choose a contract or make the distinction explicit.
+
+     function isAgeInRange(age, min, max, { inclusive = true } = {}) {
+       return inclusive
+         ? age >= min && age <= max
+         : age > min && age < max;
+     }
+
+     Use this predicate only after validating stored ages and query bounds.
+     Regression check: Test both endpoints, an interior age, an exterior age, and equal bounds.
+
+  25. Age listing has an unbounded response size.
+     Location: server.js:41, lines 41–45.
+     Status: Conditional scalability concern.
+
+     Symptom: The function scans the full array and allocates a result containing every matching record.
+     Why it matters: For a growing or remotely queryable dataset, a broad range can produce large allocations and
+     responses.
+     No dataset-size requirement is supplied, so an index cannot be justified as mandatory from this diff alone.
+     Fix: Add a bounded result contract; use indexed storage if the required scale also makes scans unacceptable.
+
+     function collectAgeMatches(min, max, limit = 100) {
+       if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+         throw new RangeError('limit must be between 1 and 100');
+       }
+       const result = [];
+       for (const user of users) {
+         if (!isAgeInRange(user.a, min, max)) continue;
+         result.push(toPublicUser(user));
+         if (result.length === limit) break;
+       }
+       return result;
+     }
+
+     Add a documented continuation mechanism for retrieving subsequent pages.
+     Regression check: Broad queries must respect the result limit.
+
+  26. Export includes plaintext passwords and every other stored field.
+     Location: server.js:49.
+     Status: New data-exposure defect.
+
+     Symptom: Importing a record containing password: "secret" makes that password appear in exportAll().
+     Future internal fields will also be exported automatically.
+     Why it matters: A profile export becomes a credential dump.
+     Replacing plaintext passwords with hashes does not make it appropriate to expose those hashes in ordinary user-data
+     exports.
+     Fix: Export an explicit public schema.
+
+     export function exportAll() {
+       const records = users.map(user => ({
+         id: user.id,
+         n: user.n,
+         e: user.e,
+         a: user.a,
+         created: user.created,
+       }));
+       return JSON.stringify(records);
+     }
+
+     If full credential backups are required, provide a separately authorized backup contract with appropriate handling.
+     Regression check: Passwords, hashes, and unexpected internal fields must never appear in profile exports.
+
+  27. Sensitive operations have no visible authorization boundary.
+     Location: server.js:48, also deletion, updates, listing, and import.
+     Status: Conditional security integration concern.
+
+     Symptom: Any caller with access to these functions can export or import all users and modify arbitrary accounts.
+     No caller identity or permission checks are shown.
+     Why it matters: Directly wiring these exports to public endpoints would expose bulk personal data and destructive
+     operations.
+     JavaScript exports are not automatically HTTP endpoints, so remote exposure is not established by this file alone.
+     Fix: Keep raw repository operations behind an authenticated service boundary.
+
+     function exportUsersFor(principal) {
+       if (!principal?.permissions?.includes('users:export')) {
+         throw Object.assign(new Error('Forbidden'), {
+           code: 'FORBIDDEN',
+         });
+       }
+       return exportAll();
+     }
+
+     The principal must come from trusted authentication, not an arbitrary request-body object.
+     Apply ownership or administrative permission checks appropriate to each operation.
+     Regression check: Unauthorized principals cannot invoke bulk operations or modify another account.
+
+  28. importAll executes its input as JavaScript.
+     Location: server.js:53.
+     Status: New critical code-execution vulnerability.
+
+     Symptom: The parameter named json is evaluated as an expression.
+     I confirmed this harmless example can clear existing module state:
+
+     importAll('(() => { users.length = 0; return []; })()');
+
+     Why it matters: Direct eval can access the function’s surrounding scope and execute code with the process’s
+     available privileges.
+     Parentheses do not restrict input to data.
+     Non-JSON object literals are also accepted, violating the apparent import format.
+     Fix: Parse JSON as data and validate the result. MDN guidance on replacing data-oriented eval
+     (https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/eval#using_json)
+
+     function parseImport(json) {
+       if (typeof json !== 'string') {
+         throw new TypeError('Import input must be a JSON string');
+       }
+       return JSON.parse(json);
+     }
+
+     Regression check: Executable expressions and JavaScript-only syntax must be rejected without changing state or
+     executing side effects.
+
+  29. Import does not require a top-level array.
+     Location: server.js:54.
+     Status: New correctness defect independent of JSON syntax validation.
+
+     Symptom: importAll('"abc"') appends three strings because strings are iterable.
+     Other valid JSON values, such as null or ordinary objects, fail with incidental iteration errors.
+     Why it matters: Replacing eval with JSON.parse alone still permits the string case.
+     Fix: Validate the document’s outer shape before iteration.
+
+     function parseUserArray(json) {
+       const parsed = parseImport(json);
+       if (!Array.isArray(parsed)) {
+         throw new TypeError('Import document must be an array of users');
+       }
+       return parsed;
+     }
+
+     An empty array can be a valid no-op if that behavior is documented.
+     Regression check: Reject strings, numbers, booleans, objects, and null as top-level documents.
+
+  30. Imported records bypass the user schema and credential boundaries.
+     Location: server.js:54.
+     Status: New high-severity integrity defect.
+
+     Symptom: [null] poisons later lookup and listing operations.
+     Records may omit created, contain invalid ages, or introduce arbitrary fields.
+     With the current eval, a __proto__ object can even supply an inherited password that login accepts.
+     Why it matters: Every reader assumes a user object, but import does not establish that invariant.
+     Creation timestamps also become inconsistent between normal creation and import.
+     Fix: Validate each record, reject unexpected fields, and construct a fresh record explicitly.
+
+     function validateImportedUser(value) {
+       if (!value || typeof value !== 'object' || Array.isArray(value)) {
+         throw new TypeError('Each imported user must be an object');
+       }
+       const allowed = new Set(['n', 'e', 'a', 'created']);
+       if (Object.keys(value).some(key => !allowed.has(key))) {
+         throw new TypeError('Unexpected user field');
+       }
+       const profile = validateProfile(value.n, value.e);
+       const age = requireAge(value.a);
+       if (!Number.isSafeInteger(value.created) || value.created < 0) {
+         throw new TypeError('created must be epoch milliseconds');
+       }
+       return { ...profile, a: age, created: value.created };
+     }
+
+     Extend this schema deliberately if stable IDs are introduced, and define migration for older records missing
+     timestamps.
+     Credential restoration needs its own restricted schema rather than arbitrary field acceptance.
+     Regression check: Reject null records, invalid fields, prototype-related keys, and malformed timestamps.
+
+  31. Import can partially commit before reporting failure.
+     Location: server.js:54.
+     Status: New transactional-integrity defect.
+
+     Symptom: The current evaluated input can be an iterator that yields a user and then throws.
+     I confirmed that the first user remains stored after the exception.
+     Why it matters: A reported failed import can nevertheless modify the dataset, making retries dangerous.
+     Removing executable iterators eliminates that particular reproducer, but adding per-row validation must not
+     introduce the same partial-write pattern.
+     Fix: Parse and validate the entire bounded batch, check conflicts, and only then commit.
+
+     export function importAll(json) {
+       const parsed = parseUserArray(json);
+       const staged = parsed.map(validateImportedUser);
+       assertUniqueEmails(staged);
+
+       for (const user of staged) {
+         users.push(user);
+       }
+       return { imported: staged.length };
+     }
+
+     For persistent storage, perform the final insertion in a transaction.
+     Regression check: A batch with an invalid or conflicting final record must leave the entire original dataset
+     unchanged.
+
+  32. Import has no input, batch, or total-storage limits.
+     Location: server.js:52, lines 52–54.
+     Status: New resource-management defect.
+
+     Symptom: The function accepts arbitrarily large input and appends arbitrarily many records synchronously.
+     Why it matters: Even after removing eval, parsing and validation can consume substantial memory and block the event
+     loop.
+     Repeated valid imports can also grow the dataset without bound.
+     Fix: Apply byte limits before parsing and record limits before staging or mutation.
+
+     function checkImportSize(json) {
+       if (typeof json !== 'string') {
+         throw new TypeError('Import input must be a string');
+       }
+       if (Buffer.byteLength(json, 'utf8') > maximumImportBytes) {
+         throw new RangeError('Import exceeds byte limit');
+       }
+     }
+
+     checkImportSize(json);
+     const parsed = parseUserArray(json);
+     if (parsed.length > maximumImportRecords ||
+         users.length + parsed.length > maximumUsers) {
+       throw new RangeError('Import exceeds record limit');
+     }
+
+     An HTTP adapter should also limit the body before buffering it in memory.
+     Regression check: Oversized inputs and quota-exceeding batches fail before any mutation.
+
+  33. Import errors and success outcomes lack a stable public contract.
+     Location: server.js:52, lines 52–55.
+     Status: New API and error-handling concern.
+
+     Symptom: Syntax failures, non-iterable values, and evaluated-code failures escape as different incidental
+     exceptions.
+     Successful import returns undefined, providing no count or structured outcome.
+     Why it matters: Callers cannot reliably distinguish malformed input, schema rejection, conflicts, and
+     infrastructure failure.
+     Raw parser details may also be inappropriate for an external response.
+     Fix: Define error codes and normalize expected parsing failures while retaining the internal cause.
+
+     function parseImport(json) {
+       if (typeof json !== 'string') {
+         throw Object.assign(new TypeError('Expected a JSON string'), {
+           code: 'INVALID_IMPORT_TYPE',
+         });
+       }
+       try {
+         return JSON.parse(json);
+       } catch (cause) {
+         if (!(cause instanceof SyntaxError)) throw cause;
+         throw Object.assign(new Error('Invalid JSON', { cause }), {
+           code: 'INVALID_JSON',
+         });
+       }
+     }
+
+     Give schema and conflict failures their own codes, and return a documented import result.
+     Do not broadly catch every failure and report success or an empty import.
+     Regression check: Each expected failure category has a stable code and preserves state.
+
+  34. Abbreviated names and inconsistent declarations obscure the data contract.
+     Location: server.js:5, also lines 10–12 and 40–43.
+     Status: Low-priority maintainability concern; partly inherited.
+
+     Symptom: Names such as n, e, a, u, and p require readers to reconstruct their meaning.
+     Newly expanded code continues using var for block-local variables, and n: n repeats identifiers unnecessarily.
+     Why it matters: The same user shape now crosses authentication, serialization, and import boundaries.
+     Clear names and documented shapes make mismatches such as the absent password field easier to notice.
+     Fix: Use descriptive parameter names, block-scoped declarations, and schema documentation.
+
+     /**
+      * @typedef {{ n: string, e: string, a: number, created: number }} UserProfile
+      */
+
+     export function addUser(name, email, age) {
+       const profile = validateProfile(name, email);
+       const user = { ...profile, a: requireAge(age), created: now() };
+       users.push(user);
+       return toPublicUser(user);
+     }
+
+     Preserve existing serialized keys unless a deliberate schema migration changes them.
+     This style concern is not, by itself, a reason to reject the change.
+     Regression check: Any naming cleanup should preserve the declared public schema and behavior.
+
+  35. No regression tests accompany the new authentication and import behavior.
+     Location: review-input.diff, entire change.
+     Status: New coverage gap; no tests were supplied.
+
+     Symptom: The patch adds authentication, sessions, filtering, serialization, and executable imports without tests.
+     Several defects are reachable with one or two calls.
+     Why it matters: Happy-path testing alone would miss missing-user deletion, missing-password login, prototype
+     lookups, expired sessions, and failed-import mutation.
+     Fix: Add behavioral tests around the corrected factory and its documented contracts.
+
+     import test from 'node:test';
+     import assert from 'node:assert/strict';
+
+     test('deleting an unknown user preserves the dataset', () => {
+       const service = createUserService();
+       service.addUser('Alice', 'alice@example.com', 30);
+       const before = service.exportAll();
+
+       assert.equal(service.deleteUser('missing@example.com'), false);
+       assert.equal(service.exportAll(), before);
+     });
+
+     test('executable import syntax is rejected without mutation', () => {
+       const service = createUserService();
+       const before = service.exportAll();
+
+       assert.throws(
+         () => service.importAll('(() => [])()'),
+         { code: 'INVALID_JSON' },
+       );
+       assert.equal(service.exportAll(), before);
+     });
+
+     Add the regression checks specified in the other findings, especially missing credentials, session revocation,
+     detached return objects, import atomicity, and boundary validation.
+     Inject time and token generation so expiration and issuance behavior can be tested deterministically.
+     The checks I ran confirmed the current defects; they do not constitute a passing regression suite for a repaired
+     implementation.
+
+  VERDICT: REVISE
+
+─ Worked for 12m 18s ───────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+› Ask Codex to do anything
+
+  gpt-6-astra xhigh · /private/tmp/pipeline-step04/samples/long · Review server.js changes

@@ -1,0 +1,71 @@
+{
+  "what": "Window and source sweep for the Claude long review (agent s04_cc_long2, pane 120x40).",
+  "captured": "2026-09-11, herdr 0.9.0, isolated session pipeline_s04, after the turn settled",
+  "raw": "each .stdout is the unmodified stdout of the command recorded for it",
+  "captures": {
+    "recent-lines-100.stdout": {
+      "command": "herdr --session pipeline_s04 agent read s04_cc_long2 --source recent --lines 100",
+      "returned_lines": 100,
+      "anchored_verdict_lines": 1,
+      "review_beginning_present": false,
+      "chars": 6408,
+      "bytes": 6876
+    },
+    "recent-lines-200.stdout": {
+      "command": "herdr --session pipeline_s04 agent read s04_cc_long2 --source recent --lines 200",
+      "returned_lines": 200,
+      "anchored_verdict_lines": 1,
+      "review_beginning_present": false,
+      "chars": 12122,
+      "bytes": 12594
+    },
+    "recent-lines-400.stdout": {
+      "command": "herdr --session pipeline_s04 agent read s04_cc_long2 --source recent --lines 400",
+      "returned_lines": 400,
+      "anchored_verdict_lines": 1,
+      "review_beginning_present": true,
+      "chars": 23853,
+      "bytes": 24347
+    },
+    "recent-lines-800.stdout": {
+      "command": "herdr --session pipeline_s04 agent read s04_cc_long2 --source recent --lines 800",
+      "returned_lines": 406,
+      "anchored_verdict_lines": 1,
+      "review_beginning_present": true,
+      "chars": 24134,
+      "bytes": 24669
+    },
+    "recent-lines-1600.stdout": {
+      "command": "herdr --session pipeline_s04 agent read s04_cc_long2 --source recent --lines 1600",
+      "returned_lines": 406,
+      "anchored_verdict_lines": 1,
+      "review_beginning_present": true,
+      "chars": 24134,
+      "bytes": 24669
+    },
+    "source-visible-lines-800.stdout": {
+      "command": "herdr --session pipeline_s04 agent read s04_cc_long2 --source visible --lines 800",
+      "returned_lines": 39,
+      "anchored_verdict_lines": 1,
+      "review_beginning_present": false,
+      "chars": 2322,
+      "bytes": 2788
+    },
+    "source-recent-lines-800.stdout": {
+      "command": "herdr --session pipeline_s04 agent read s04_cc_long2 --source recent --lines 800",
+      "returned_lines": 406,
+      "anchored_verdict_lines": 1,
+      "review_beginning_present": true,
+      "chars": 24134,
+      "bytes": 24669
+    },
+    "source-recent-unwrapped-lines-800.stdout": {
+      "command": "herdr --session pipeline_s04 agent read s04_cc_long2 --source recent-unwrapped --lines 800",
+      "returned_lines": 405,
+      "anchored_verdict_lines": 1,
+      "review_beginning_present": true,
+      "chars": 24133,
+      "bytes": 24669
+    }
+  }
+}

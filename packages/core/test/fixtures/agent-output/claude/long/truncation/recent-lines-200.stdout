@@ -1,0 +1,200 @@
+  angle). From a security standpoint, an attacker who steals a token once has access forever.
+  Fix: add a logout(id) export and a createdAt/expiry check in getSession:
+  const SESSION_TTL_MS = 30 * 60 * 1000;
+
+  export function logout(id) {
+    sessions.delete(id);
+  }
+
+  export function getSession(id) {
+    const s = sessions.get(id);
+    if (!s) return null;
+    if (Date.now() - s.createdAt > SESSION_TTL_MS) {
+      sessions.delete(id);
+      return null;
+    }
+    return s;
+  }
+
+  14. No brute-force / rate limiting protection on login (server.js:26-34)
+  Symptom: login can be called an unbounded number of times per second with no lockout, delay, or counter.
+  Why it matters: Combined with plaintext-or-weak password comparison, this makes online password-guessing attacks
+  trivial. While rate limiting is often implemented at a layer above this module (e.g., API gateway), the module itself
+  offers no hook (like a failed-attempt counter) for that layer to use.
+  Fix: at minimum, track failed attempts per email/IP and expose enough information for a caller to enforce backoff, or
+  integrate a library like rate-limiter-flexible at the endpoint that calls login.
+
+  15. Email is not normalized before comparison/storage (server.js:5-8, 10-14, 17, 28)
+  Symptom: Emails are compared and stored as-is; Foo@Example.com and foo@example.com are treated as distinct.
+  Why it matters: This allows effective duplicate accounts that differ only by case (compounding finding #6), and can
+  let an attacker register a look-alike account for social engineering, or cause a legitimate user to be unable to log
+  in if they type their email with different casing than at signup.
+  Fix: normalize on write and read: const normalize = (e) => e.trim().toLowerCase();
+
+  Error Handling
+
+  16. No input validation anywhere in the new code (server.js: all new functions)
+  Symptom: addUser, updateAge, login, listUsersByAge, importAll accept any value for their parameters with zero
+  type/shape checks (e.g., a could be a string, NaN, negative, or an object).
+  Why it matters: Invalid data silently corrupts internal state (e.g., updateAge(e, "old") sets a to a string, breaking
+  the numeric comparisons in listUsersByAge), and there's no early, clear failure — bugs surface far from their cause,
+  which is expensive to debug.
+  Fix: validate at the boundary and throw descriptive errors:
+  export function updateAge(e, a) {
+    if (typeof a !== 'number' || !Number.isFinite(a) || a < 0) {
+      throw new TypeError(`Invalid age: ${a}`);
+    }
+    const u = findUser(e);
+    if (!u) throw new Error(`No user with email ${e}`);
+    u.a = a;
+  }
+
+  17. importAll does not validate the shape of parsed entries before pushing (server.js:52-55)
+  Symptom: for (const p of parsed) users.push(p); pushes whatever objects are in the array, with no check that each has
+  n/e/a or that parsed is even iterable (for...of on a non-iterable throws an unhelpful low-level TypeError).
+  Why it matters: Malformed or partial records silently pollute the users array, and later code that assumes every user
+  has .e (like findUser) can now throw on entries that don't. Errors surface far from the actual bad input.
+  Fix:
+  export function importAll(json) {
+    const parsed = JSON.parse(json);
+    if (!Array.isArray(parsed)) throw new Error('importAll expects a JSON array');
+    for (const p of parsed) {
+      if (typeof p?.n !== 'string' || typeof p?.e !== 'string' || typeof p?.a !== 'number') {
+        throw new Error(`Invalid user record: ${JSON.stringify(p)}`);
+      }
+      users.push({ n: p.n, e: p.e, a: p.a, created: Date.now() });
+    }
+  }
+
+  18. deleteUser and updateAge return undefined on both success and failure (server.js:16-19, 21-24)
+  Symptom: Neither function returns any signal distinguishing "did the thing" from "found nothing to do."
+  Why it matters: Callers have no reliable way to detect a no-op deletion/update short of calling findUser again
+  themselves, which is wasted work and encourages callers to just trust the call succeeded (dangerous, given finding
+  #2).
+  Fix: return a boolean (or the affected record) as shown in findings #2 and #3's fixes.
+
+  API Design
+
+  19. addUser's return value (users.length) is not a stable identifier (server.js:5-8)
+  Symptom: The "ID" returned by addUser is just the array length at insertion time. After any deleteUser call, this
+  number no longer corresponds to any consistent position, and it's reused/shifted for subsequent users.
+  Why it matters: If any caller persists this "ID" (e.g., a session or foreign key referencing a user), it will silently
+  point to the wrong user after a deletion, because array indices shift. There is no actual unique, stable primary key
+  on user records at all — email is the de facto key, but it's mutable data, not an ID.
+  Fix: assign a proper immutable ID:
+  let nextUserId = 1;
+  export function addUser(n, e, a) {
+    const id = nextUserId++;
+    users.push({ id, n, e, a, created: Date.now() });
+    return id;
+  }
+
+  20. Terse, unexplained field names n, e, a reduce API readability (server.js:6)
+  Symptom: User records use single-letter keys for name/email/age with no type declarations or documentation.
+  Why it matters: This is a public module surface (everything is exported) consumed by other files/services. Callers
+  have to go read the implementation to learn that e means email, which is an unnecessary tax on every future maintainer
+  and increases the chance of misuse (e.g., swapping n/e positionally when constructing objects to pass into
+  importAll).
+  Fix: rename to name, email, age (or, if brevity is a hard constraint, add TypeScript types/JSDoc typedefs documenting
+  the shape).
+
+  21. login's return shape and getSession's return shape aren't validated/typed, and there's no way to invalidate one
+  session without wiping all (server.js:26-34, 36-38)
+  Symptom: The public contract for a "session" is implicit ({ email, token } from login, but getSession returns whatever
+  is stored, including future extra fields) and there is no logout, listSessions, or revokeAllSessions API.
+  Why it matters: Beyond the security implications already covered (findings #9, #13), this is a lifecycle gap in the
+  API surface: consumers can create sessions but have no supported way to manage them, forcing ad hoc workarounds (e.g.,
+  directly mutating the exported module internals, which aren't even exposed).
+  Fix: round out the session API with logout(id), and consider returning only the fields a client actually needs from
+  login (i.e., not re-deriving email server-side from something the client already knows).
+
+  22. Inconsistent mutability contract: listUsersByAge and findUser return live references into internal state
+  (server.js:10-14, 40-46)
+  Symptom: Both functions return the actual objects stored in the users array, not copies.
+  Why it matters: Any caller can do findUser(email).a = 999 and silently mutate internal server state without going
+  through updateAge (bypassing any validation added per finding #16). This breaks encapsulation and makes the module's
+  true mutation surface impossible to reason about or audit.
+  Fix: return shallow copies for read APIs:
+  export function findUser(e) {
+    const u = users.find((x) => x.e === e);
+    return u ? { ...u } : undefined;
+  }
+
+  Style
+
+  23. Inconsistent variable declarations: var mixed with const/let (server.js:11, 41)
+  Symptom: findUser and listUsersByAge still use for (var i = ...) while the rest of the new code uses const/let.
+  Why it matters: var is function-scoped (not block-scoped), which is a common source of subtle closure bugs, and mixing
+  styles within one file signals the change wasn't fully cleaned up/reviewed for consistency, which erodes confidence
+  in the rest of the diff.
+  Fix: use for...of with Array.prototype methods (also resolves findings #1 and #5), or at minimum switch to let.
+
+  24. Verbose object construction instead of ES6 shorthand (server.js:6)
+  Symptom: { n: n, e: e, a: a, created: Date.now() } repeats each identifier instead of using property shorthand.
+  Why it matters: Minor, but it's needless noise; shorthand is the established convention in modern JS and makes
+  diffs/reviews faster to read.
+  Fix: { n, e, a, created: Date.now() }.
+
+  25. No JSDoc or type annotations on any exported function (server.js: entire file)
+  Symptom: None of addUser, findUser, login, etc. document parameter types, return types, or failure modes (throws vs.
+  returns null/undefined).
+  Why it matters: This is a small, security-sensitive module (auth, session tokens) with an all-exported public surface;
+  consumers integrating with it have to read the source to learn behavior like "returns undefined if not found" vs.
+  "throws," which is exactly the kind of ambiguity that produced findings #1–#3.
+  Fix: add JSDoc at minimum:
+  /**
+   * @param {string} email
+   * @returns {{n:string,e:string,a:number}|undefined}
+   */
+  export function findUser(email) { /* ... */ }
+
+  Testability
+
+  26. Module-level mutable singletons (users, sessions, sessionCounter) make unit tests order-dependent and hard to
+  isolate (server.js:1-3)
+  Symptom: There is no exported reset/teardown function. Every test that calls addUser, login, etc. permanently mutates
+  shared module state for the lifetime of the process/test file.
+  Why it matters: Tests can't run in isolation or in parallel without interfering with each other (e.g., a test
+  asserting users.length === 1 will fail if a prior test already added users), forcing brittle ordering assumptions or
+  manual state cleanup hacks in every test file that imports this module.
+  Fix: expose a reset hook for tests, or better, wrap state in a factory function that tests can instantiate fresh:
+    sessions.clear();
+    sessionCounter = 0;
+  }
+
+  27. Date.now() and token generation aren't injectable, complicating deterministic tests (server.js:6, 29-30)
+  Symptom: created: Date.now() and 'tok_' + sessionCounter are hard-coded calls with no way to control or mock them from
+  a test without global monkey-patching (jest.spyOn(Date, 'now'), etc.).
+  Why it matters: Testing time-sensitive behavior (e.g., a future session-expiry check, per finding #13) becomes fragile
+  and coupled to global mutation of Date/crypto, rather than clean dependency injection.
+  Fix: accept a clock/ID-generator as an optional parameter (or module-level, swappable dependency) so tests can supply
+  deterministic fakes:
+  export function addUser(n, e, a, { now = Date.now } = {}) {
+    users.push({ n, e, a, created: now() });
+    return users.length;
+  }
+
+  28. No test coverage accompanies this diff at all
+  Symptom: The diff adds five new exported functions (login, getSession, listUsersByAge, exportAll, importAll) and
+  modifies the behavior of existing ones, with zero corresponding test file changes.
+  Why it matters: Given how many of the above bugs (off-by-one loop, eval RCE, predictable tokens, broken auth) are
+  exactly the sort of thing a basic unit test (findUser returns undefined for a missing user; login rejects wrong
+  passwords; importAll rejects non-JSON) would have caught before merge, the absence of tests is itself a significant
+  gap for a diff touching authentication.
+  Fix: add unit tests per function before merging, especially negative-path tests ("user not found", "wrong password",
+  "malformed import payload").
+
+  ---
+
+  Given the presence of a remote-code-execution vector (eval in importAll), broken/non-functional authentication,
+  predictable session tokens, and multiple correctness bugs that cause crashes or silent data corruption on common
+  inputs, this diff should not be merged as-is.
+
+  VERDICT: REVISE
+
+✻ Churned for 1m 59s · done 11:01 PM
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────── s04-cc-long ─
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents                                                           /rc

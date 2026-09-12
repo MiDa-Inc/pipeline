@@ -1,0 +1,70 @@
+Do a thorough line-by-line code review of this change to server.js. Cover correctness, security, error handling, API design, style and testability. Write a numbered finding for every problem you find, and for each give: the symptom, why it matters, and a concrete fix with example code. Be exhaustive and verbose: your review must be at least 200 lines long.
+
+```diff
+diff --git a/server.js b/server.js
+index f6236f2..0b35f52 100644
+--- a/server.js
++++ b/server.js
+@@ -1,5 +1,55 @@
+ const users = [];
+-export function addUser(n, e, a) { users.push({n:n,e:e,a:a}); return users.length; }
+-export function findUser(e) { for (var i=0;i<=users.length;i++){ if(users[i].e==e) return users[i]; } }
+-export function deleteUser(e) { const i = users.findIndex(u=>u.e==e); users.splice(i,1); }
+-export function updateAge(e,a) { const u=findUser(e); u.a=a; }
++let sessionCounter = 0;
++const sessions = {};
++
++export function addUser(n, e, a) {
++  users.push({ n: n, e: e, a: a, created: Date.now() });
++  return users.length;
++}
++
++export function findUser(e) {
++  for (var i = 0; i <= users.length; i++) {
++    if (users[i].e == e) return users[i];
++  }
++}
++
++export function deleteUser(e) {
++  const i = users.findIndex((u) => u.e == e);
++  users.splice(i, 1);
++}
++
++export function updateAge(e, a) {
++  const u = findUser(e);
++  u.a = a;
++}
++
++export function login(e, password) {
++  const u = findUser(e);
++  if (u.password == password) {
++    sessionCounter = sessionCounter + 1;
++    sessions[sessionCounter] = { email: e, token: 'tok_' + sessionCounter };
++    return sessions[sessionCounter];
++  }
++  return null;
++}
++
++export function getSession(id) {
++  return sessions[id];
++}
++
++export function listUsersByAge(min, max) {
++  var out = [];
++  for (var i = 0; i < users.length; i++) {
++    if (users[i].a > min && users[i].a < max) out.push(users[i]);
++  }
++  return out;
++}
++
++export function exportAll() {
++  return JSON.stringify(users);
++}
++
++export function importAll(json) {
++  const parsed = eval('(' + json + ')');
++  for (const p of parsed) users.push(p);
++}
+```
+
+Finish your reply with exactly one line, on its own line, either "VERDICT: APPROVE" or "VERDICT: REVISE".

@@ -1,0 +1,66 @@
+{
+  "sample": "claude/short",
+  "target": "s04_cc_short",
+  "prompt": "Review this change to util.js. Keep the review to a few sentences.\n\n```diff\ndiff --git a/util.js b/util.js\nindex 542f772..8782ea2 100644\n--- a/util.js\n+++ b/util.js\n@@ -1,3 +1,4 @@\n export function clamp(value, min, max) {\n+  if (min > max) throw new RangeError('min must be <= max');\n   return Math.min(Math.max(value, min), max);\n }\n```\n\nFinish your reply with exactly one line, on its own line, either \"VERDICT: APPROVE\" or \"VERDICT: REVISE\".",
+  "prompt_submitted_at": "22:56:33.814",
+  "prompt_returned_at": "22:56:37.015",
+  "prompt_exit": 0,
+  "prompt_timeout_ms": 300000,
+  "seconds_prompt_to_return": 3.202,
+  "seconds_to_first_settled_observed": 3.152,
+  "first_settled_state_observed": "done",
+  "poll_interval_s": 0.5,
+  "observed_states_sampled": [
+    {
+      "ts": "22:56:33.819",
+      "t": 0.006,
+      "agent_status": "idle",
+      "state_change_seq": 9
+    },
+    {
+      "ts": "22:56:34.331",
+      "t": 0.517,
+      "agent_status": "working",
+      "state_change_seq": 10
+    },
+    {
+      "ts": "22:56:36.965",
+      "t": 3.152,
+      "agent_status": "done",
+      "state_change_seq": 11
+    }
+  ],
+  "read_command": "herdr --session pipeline_s04 agent read s04_cc_short --source recent --lines 400",
+  "read_at": "22:56:39.018",
+  "read_exit": 0,
+  "read_later_at": "22:56:44.041",
+  "read_later_exit": 0,
+  "note_sampling": "states polled every 0.5s; transitions shorter than the interval can be missed. This is a sample, not a complete event history.",
+  "category": "short review",
+  "agent": "claude",
+  "agent_version": "2.1.269 (Claude Code)",
+  "model": "sonnet (resolved claude-sonnet-5)",
+  "herdr_version": "0.9.0",
+  "herdr_session": "pipeline_s04 (isolated headless server)",
+  "pane_geometry": {
+    "rect_width": 120,
+    "rect_height": 40,
+    "shell_cols": 119,
+    "shell_rows": 40
+  },
+  "platform": "macOS 26.5.2 arm64",
+  "launch_command": "claude --model sonnet --restricted --strict-mcp-config --tools \"Read,Glob,Grep\" --permission-mode acceptEdits --name <s04-cc-SAMPLE>",
+  "input_diff": "input.diff",
+  "prompt_file": "prompt.txt",
+  "expected_verdict": "approve",
+  "expected_verdict_basis": "Agent's own answer ends with 'VERDICT: APPROVE'; taken from the final line of its reply, not from the prompt text.",
+  "verdict_line_matches_in_capture": 1,
+  "read_chars": 1471,
+  "read_later_chars": 1471,
+  "read_bytes": 1973,
+  "read_later_bytes": 1980,
+  "units_note": "read_chars / read_later_chars are Unicode character counts (Python len of the decoded text); read_bytes / read_later_bytes are the UTF-8 file sizes. An earlier revision mislabelled the character counts as bytes.",
+  "seconds_prompt_return_to_first_read": 2.003,
+  "seconds_first_read_to_second_read": 5.023,
+  "read_timing_note": "The harness sleeps ~2 s after agent prompt returns (to finish polling) before the first read, then ~5 s more before the second. No capture was taken immediately at settle, so nothing here establishes whether an immediate read is complete."
+}
