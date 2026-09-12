@@ -1,0 +1,19 @@
+{
+  "name": "sample-app",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "word-count": "./dist/main.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/main.js",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.9",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.7"
+  }
+}
