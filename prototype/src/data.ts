@@ -69,3 +69,63 @@ export const KIND_LABEL: Record<NodeKind, string> = {
   gate: 'Gate',
   end: 'End',
 };
+
+/* ---------------------------------------------------------------------------
+ * Simulated runs. The sequences below mirror the golden scenarios in
+ * spec/scenarios/, so what the prototype shows agrees with docs/SPEC.md.
+ * run_id, seq and ts are omitted: this is a display model, not a run log.
+ * ------------------------------------------------------------------------- */
+export type RunStatus = 'running' | 'paused' | 'done' | 'stopped';
+
+export interface RunEvent {
+  type:
+    | 'run_started'
+    | 'node_started'
+    | 'handoff_written'
+    | 'node_finished'
+    | 'escalated'
+    | 'resumed'
+    | 'run_finished';
+  node?: string;
+  round?: number;
+  outcome?: string;
+  reason?: string;
+  path?: string;
+  status?: 'done' | 'stopped';
+}
+
+/** spec/scenarios/approve-round-1.yaml */
+const APPROVE: RunEvent[] = [
+  { type: 'run_started' },
+  { type: 'node_started', node: 'implementer', round: 1 },
+  { type: 'node_finished', node: 'implementer', round: 1, outcome: 'done' },
+  { type: 'node_started', node: 'test_gate', round: 1 },
+  { type: 'handoff_written', node: 'test_gate', round: 1, path: 'handoffs/r1-test_gate-1.txt' },
+  { type: 'node_finished', node: 'test_gate', round: 1, outcome: 'pass' },
+  { type: 'node_started', node: 'reviewer', round: 1 },
+  { type: 'node_finished', node: 'reviewer', round: 1, outcome: 'approve' },
+  { type: 'node_started', node: 'done', round: 1 },
+  { type: 'run_finished', status: 'done' },
+];
+
+/** spec/scenarios/resume-after-blocked.yaml — pauses at the escalation until Resume. */
+const BLOCKED: RunEvent[] = [
+  ...APPROVE.slice(0, 7),
+  { type: 'escalated', node: 'reviewer', round: 1, reason: 'blocked' },
+  { type: 'resumed', node: 'reviewer', round: 1 },
+  { type: 'node_finished', node: 'reviewer', round: 1, outcome: 'approve' },
+  { type: 'node_started', node: 'done', round: 1 },
+  { type: 'run_finished', status: 'done' },
+];
+
+export const RUNS = {
+  approve: { label: 'Approve on round 1', events: APPROVE },
+  blocked: { label: 'Reviewer blocked, then resume', events: BLOCKED },
+};
+export type RunKey = keyof typeof RUNS;
+
+/** Sample handoff contents, opened from the timeline. */
+export const HANDOFFS: Record<string, string> = {
+  'handoffs/r1-test_gate-1.txt':
+    '> npm test\n\n  ✓ limits burst size (12ms)\n  ✓ refills the bucket over time (8ms)\n  ✓ rejects over-limit uploads with 429 (5ms)\n\n  12 passing (241ms)\n\nexit status 0',
+};

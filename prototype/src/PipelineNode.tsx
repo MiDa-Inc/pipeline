@@ -6,6 +6,7 @@ export interface PipelineNodeData extends Record<string, unknown> {
   label: string;
   kind: NodeKind;
   subtitle: string;
+  runState?: 'active' | 'paused' | 'visited' | 'pending' | undefined;
 }
 
 /**
@@ -14,7 +15,11 @@ export interface PipelineNodeData extends Record<string, unknown> {
  */
 export function PipelineNode({ data, selected }: NodeProps & { data: PipelineNodeData }) {
   return (
-    <div className={`node node--${data.kind}`} data-selected={selected || undefined}>
+    <div
+      className={`node node--${data.kind}`}
+      data-selected={selected || undefined}
+      data-run={data.runState}
+    >
       <Handle type="target" position={Position.Left} id="in" />
       <Handle type="target" position={Position.Bottom} id="loop-in" />
       <span className="node__kind">{KIND_LABEL[data.kind]}</span>

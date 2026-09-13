@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   Background,
   Controls,
@@ -10,9 +10,24 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 
-import { EDGES, MAX_ROUNDS, NODES, PIPELINE_NAME, type NodeSettings } from './data';
+import {
+  EDGES,
+  MAX_ROUNDS,
+  NODES,
+  PIPELINE_NAME,
+  RUNS,
+  type NodeSettings,
+  type RunEvent,
+  type RunKey,
+  type RunStatus,
+} from './data';
+import { EscalationBanner } from './EscalationBanner';
 import { Inspector } from './Inspector';
 import { PipelineNode, type PipelineNodeData } from './PipelineNode';
+import { Timeline } from './Timeline';
+
+const STEP_MS = 900;
+const STOPPED: RunEvent = { type: 'run_finished', status: 'stopped' };
 
 const nodeTypes = { pipeline: PipelineNode };
 
@@ -22,6 +37,51 @@ const subtitleOf = (s: NodeSettings): string =>
 export function App() {
   const [nodes, setNodes] = useState(NODES);
   const [selectedId, setSelectedId] = useState<string | undefined>('reviewer');
+  const [mode, setMode] = useState<'design' | 'run'>('design');
+  const [runKey, setRunKey] = useState<RunKey>('approve');
+  const [step, setStep] = useState(0);
+  const [stopped, setStopped] = useState(false);
+  const [openHandoff, setOpenHandoff] = useState<string | undefined>();
+
+  const script = RUNS[runKey].events;
+  const events = stopped ? [...script.slice(0, step), STOPPED] : script.slice(0, step);
+  const last = events[events.length - 1];
+
+  const status: RunStatus = stopped
+    ? 'stopped'
+    : last?.type === 'run_finished'
+      ? 'done'
+      : last?.type === 'escalated'
+        ? 'paused'
+        : step > 0
+          ? 'running'
+          : 'running';
+
+  // The simulation advances on a timer and halts on its own at an escalation.
+  useEffect(() => {
+    if (mode !== 'run' || status !== 'running' || step >= script.length) return;
+    const id = setTimeout(() => setStep((s) => s + 1), step === 0 ? 250 : STEP_MS);
+    return () => clearTimeout(id);
+  }, [mode, status, step, script.length]);
+
+  const round = [...events].reverse().find((e) => e.round)?.round ?? 1;
+  // The node the run is sitting on. Kept highlighted while paused too, so an escalation is
+  // locatable on the canvas rather than only in the timeline.
+  const currentNode = [...events].reverse().find((e) => e.type === 'node_started')?.node;
+  const activeNode = status === 'running' || status === 'paused' ? currentNode : undefined;
+  // Derive from node_started, not node_finished: an end node emits node_started then run_finished
+  // and never a node_finished (docs/SPEC.md section 3), so it would otherwise stay dimmed.
+  const visited = new Set(
+    events.filter((e) => e.type === 'node_started' && e.node !== activeNode).map((e) => e.node),
+  );
+
+  const startRun = (key: RunKey) => {
+    setRunKey(key);
+    setMode('run');
+    setStep(0);
+    setStopped(false);
+    setOpenHandoff(undefined);
+  };
 
   const flowNodes: Node<PipelineNodeData>[] = useMemo(
     () =>
@@ -30,9 +90,23 @@ export function App() {
         type: 'pipeline',
         position: n.position,
         selected: n.id === selectedId,
-        data: { label: n.id, kind: n.kind, subtitle: subtitleOf(n.settings) },
+        data: {
+          label: n.id,
+          kind: n.kind,
+          subtitle: subtitleOf(n.settings),
+          runState:
+            mode !== 'run'
+              ? undefined
+              : n.id === activeNode
+                ? status === 'paused'
+                  ? 'paused'
+                  : 'active'
+                : visited.has(n.id)
+                  ? 'visited'
+                  : 'pending',
+        },
       })),
-    [nodes, selectedId],
+    [nodes, selectedId, mode, activeNode, visited, status],
   );
 
   const flowEdges: Edge[] = useMemo(
@@ -91,6 +165,29 @@ export function App() {
         <span className="topbar__meta">
           {nodes.length} nodes · {EDGES.length} edges · max_rounds {MAX_ROUNDS}
         </span>
+
+        <div className="modes" role="group" aria-label="Mode">
+          <button type="button" aria-pressed={mode === 'design'} onClick={() => setMode('design')}>
+            Design
+          </button>
+          <button type="button" aria-pressed={mode === 'run'} onClick={() => startRun(runKey)}>
+            Run
+          </button>
+        </div>
+
+        {mode === 'run' && (
+          <>
+            <span className="topbar__run">
+              round {round} · <span className={`pill pill--${status}`}>{status}</span>
+            </span>
+            <button type="button" className="btn" onClick={() => startRun('approve')}>
+              Replay: approve
+            </button>
+            <button type="button" className="btn" onClick={() => startRun('blocked')}>
+              Replay: escalation
+            </button>
+          </>
+        )}
       </header>
 
       <main className="canvas">
@@ -111,7 +208,25 @@ export function App() {
         </ReactFlow>
       </main>
 
-      <Inspector node={nodes.find((n) => n.id === selectedId)} onChange={updateSettings} />
+      {mode === 'run' ? (
+        <Timeline
+          events={events}
+          status={status}
+          openHandoff={openHandoff}
+          onOpenHandoff={setOpenHandoff}
+        />
+      ) : (
+        <Inspector node={nodes.find((n) => n.id === selectedId)} onChange={updateSettings} />
+      )}
+
+      {mode === 'run' && status === 'paused' && last?.type === 'escalated' && (
+        <EscalationBanner
+          reason={last.reason ?? 'unknown'}
+          node={last.node ?? ''}
+          onResume={() => setStep((s) => s + 1)}
+          onStop={() => setStopped(true)}
+        />
+      )}
     </div>
   );
 }
