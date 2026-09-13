@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pipeline.local/spec/pipelines/reference.schema.json",
+  "title": "Spec fixture pipeline",
+  "description": "Validates the pipeline fixtures used by the golden scenarios. Not the production pipeline schema (step 19) and not a graph validator (step 21): a port with no edge stays representable so the unrouted scenario can exist.",
+  "type": "object",
+  "properties": {
+    "version": { "const": 1 },
+    "name": { "type": "string", "minLength": 1 },
+    "start": { "$ref": "#/$defs/nodeName" },
+    "limits": {
+      "type": "object",
+      "properties": {
+        "max_rounds": { "type": "integer", "minimum": 1 },
+        "turn_timeout": { "$ref": "#/$defs/duration" }
+      },
+      "required": ["max_rounds", "turn_timeout"],
+      "additionalProperties": false
+    },
+    "nodes": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": { "$ref": "#/$defs/nodeName" },
+      "additionalProperties": { "$ref": "#/$defs/node" }
+    }
+  },
+  "required": ["version", "name", "start", "limits", "nodes"],
+  "additionalProperties": false,
+  "$defs": {
+    "nodeName": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_-]*$" },
+    "duration": { "type": "string", "pattern": "^[0-9]+(ms|s|m|h)$" },
+    "edge": {
+      "description": "Short form is the target node name; long form adds the prompt template for the next turn.",
+      "oneOf": [
+        { "$ref": "#/$defs/nodeName" },
+        {
+          "type": "object",
+          "properties": {
+            "to": { "$ref": "#/$defs/nodeName" },
+            "message": { "type": "string", "minLength": 1 }
+          },
+          "required": ["to", "message"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "node": {
+      "type": "object",
+      "oneOf": [
+        {
+          "title": "agent",
+          "type": "object",
+          "properties": {
+            "type": { "const": "agent" },
+            "profile": { "type": "string", "minLength": 1 },
+            "permission": { "enum": ["edit", "read-only"] },
+            "verdict": { "type": "boolean" },
+            "role": { "type": "string", "minLength": 1 },
+            "next": {
+              "description": "Ports: done for an agent without verdict; approve and revise with it. Any may be absent (unrouted).",
+              "type": "object",
+              "properties": {
+                "done": { "$ref": "#/$defs/edge" },
+                "approve": { "$ref": "#/$defs/edge" },
+                "revise": { "$ref": "#/$defs/edge" }
+              },
+              "additionalProperties": false
+            }
+          },
+          "required": ["type", "profile", "permission", "role", "next"],
+          "additionalProperties": false
+        },
+        {
+          "title": "gate",
+          "type": "object",
+          "properties": {
+            "type": { "const": "gate" },
+            "run": { "type": "string", "minLength": 1 },
+            "timeout": { "$ref": "#/$defs/duration" },
+            "next": {
+              "type": "object",
+              "properties": {
+                "pass": { "$ref": "#/$defs/edge" },
+                "fail": { "$ref": "#/$defs/edge" }
+              },
+              "additionalProperties": false
+            }
+          },
+          "required": ["type", "run", "timeout", "next"],
+          "additionalProperties": false
+        },
+        {
+          "title": "end",
+          "type": "object",
+          "properties": { "type": { "const": "end" } },
+          "required": ["type"],
+          "additionalProperties": false
+        }
+      ]
+    }
+  }
+}

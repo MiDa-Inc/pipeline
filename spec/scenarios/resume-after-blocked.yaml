@@ -1,0 +1,105 @@
+name: resume-after-blocked
+covers: [R4, R10, R12]
+pipeline: reference
+task: Add rate limiting to /api/upload
+inputs:
+  - { kind: agent_result, node: implementer, result: settled, text: "Implementation.\n" }
+  - { kind: gate_result, node: test_gate, exit_status: 0, output: "12 passing\n" }
+  - { kind: agent_result, node: reviewer, result: blocked }
+  - { kind: guard_observation, node: reviewer, changed: false }
+  - { kind: operator_action, action: resume }
+  - { kind: agent_result, node: reviewer, result: settled, text: "VERDICT: APPROVE\n" }
+  - { kind: guard_observation, node: reviewer, changed: false }
+expect:
+  - {
+      type: run_started,
+      run_id: run-10,
+      seq: 1,
+      ts: '2026-09-13T09:00:00Z',
+      pipeline: feature-loop,
+      task: Add rate limiting to /api/upload,
+    }
+  - {
+      type: node_started,
+      run_id: run-10,
+      seq: 2,
+      ts: '2026-09-13T09:00:01Z',
+      node: implementer,
+      round: 1,
+    }
+  - {
+      type: node_finished,
+      run_id: run-10,
+      seq: 3,
+      ts: '2026-09-13T09:05:00Z',
+      node: implementer,
+      round: 1,
+      outcome: done,
+    }
+  - {
+      type: node_started,
+      run_id: run-10,
+      seq: 4,
+      ts: '2026-09-13T09:05:01Z',
+      node: test_gate,
+      round: 1,
+    }
+  - {
+      type: handoff_written,
+      run_id: run-10,
+      seq: 5,
+      ts: '2026-09-13T09:06:00Z',
+      node: test_gate,
+      round: 1,
+      path: handoffs/r1-test_gate-1.txt,
+    }
+  - {
+      type: node_finished,
+      run_id: run-10,
+      seq: 6,
+      ts: '2026-09-13T09:06:01Z',
+      node: test_gate,
+      round: 1,
+      outcome: pass,
+    }
+  - {
+      type: node_started,
+      run_id: run-10,
+      seq: 7,
+      ts: '2026-09-13T09:06:02Z',
+      node: reviewer,
+      round: 1,
+    }
+  - {
+      type: escalated,
+      run_id: run-10,
+      seq: 8,
+      ts: '2026-09-13T09:08:00Z',
+      node: reviewer,
+      round: 1,
+      reason: blocked,
+    }
+  - { type: resumed, run_id: run-10, seq: 9, ts: '2026-09-13T09:20:00Z', node: reviewer, round: 1 }
+  - {
+      type: node_finished,
+      run_id: run-10,
+      seq: 10,
+      ts: '2026-09-13T09:22:00Z',
+      node: reviewer,
+      round: 1,
+      outcome: approve,
+    }
+  - {
+      type: node_started,
+      run_id: run-10,
+      seq: 11,
+      ts: '2026-09-13T09:22:01Z',
+      node: done,
+      round: 1,
+    }
+  - { type: run_finished, run_id: run-10, seq: 12, ts: '2026-09-13T09:22:02Z', status: done }
+side_effects:
+  - assert: no_prompt_resubmission
+    detail: R12. Resume continues observing the same turn; it does not re-send the reviewer's prompt. A later runtime test observes exactly one prompt submission to the reviewer across the whole run.
+  - assert: guard_baseline_preserved
+    detail: R12. The reviewer's effective guard baseline, captured before its turn, survives the escalation and resume; the post-turn comparison after resume uses that same baseline rather than a fresh one.

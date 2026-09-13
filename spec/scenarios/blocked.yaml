@@ -1,0 +1,81 @@
+name: blocked
+covers: [R4, R10]
+pipeline: reference
+task: Add rate limiting to /api/upload
+inputs:
+  - { kind: agent_result, node: implementer, result: settled, text: "Implementation.\n" }
+  - { kind: gate_result, node: test_gate, exit_status: 0, output: "12 passing\n" }
+  - { kind: agent_result, node: reviewer, result: blocked }
+  - { kind: guard_observation, node: reviewer, changed: false }
+expect:
+  - {
+      type: run_started,
+      run_id: run-5,
+      seq: 1,
+      ts: '2026-09-13T09:00:00Z',
+      pipeline: feature-loop,
+      task: Add rate limiting to /api/upload,
+    }
+  - {
+      type: node_started,
+      run_id: run-5,
+      seq: 2,
+      ts: '2026-09-13T09:00:01Z',
+      node: implementer,
+      round: 1,
+    }
+  - {
+      type: node_finished,
+      run_id: run-5,
+      seq: 3,
+      ts: '2026-09-13T09:05:00Z',
+      node: implementer,
+      round: 1,
+      outcome: done,
+    }
+  - {
+      type: node_started,
+      run_id: run-5,
+      seq: 4,
+      ts: '2026-09-13T09:05:01Z',
+      node: test_gate,
+      round: 1,
+    }
+  - {
+      type: handoff_written,
+      run_id: run-5,
+      seq: 5,
+      ts: '2026-09-13T09:06:00Z',
+      node: test_gate,
+      round: 1,
+      path: handoffs/r1-test_gate-1.txt,
+    }
+  - {
+      type: node_finished,
+      run_id: run-5,
+      seq: 6,
+      ts: '2026-09-13T09:06:01Z',
+      node: test_gate,
+      round: 1,
+      outcome: pass,
+    }
+  - {
+      type: node_started,
+      run_id: run-5,
+      seq: 7,
+      ts: '2026-09-13T09:06:02Z',
+      node: reviewer,
+      round: 1,
+    }
+  - {
+      type: escalated,
+      run_id: run-5,
+      seq: 8,
+      ts: '2026-09-13T09:08:00Z',
+      node: reviewer,
+      round: 1,
+      reason: blocked,
+    }
+side_effects:
+  - assert: no_prompt_resubmission
+    detail: R4 and R12. The reviewer is prompted once; the permission dialog pauses the run and the engine does not re-prompt while paused. A later runtime test observes the prompt count for the reviewer node.

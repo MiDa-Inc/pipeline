@@ -1,0 +1,95 @@
+name: approve-round-1
+covers: [R1, R4, R5, R7, R8, R9, R11, R14, R15]
+pipeline: reference
+task: Add rate limiting to /api/upload
+inputs:
+  - {
+      kind: agent_result,
+      node: implementer,
+      result: settled,
+      text: "Added a token bucket limiter and tests.\n",
+    }
+  - { kind: gate_result, node: test_gate, exit_status: 0, output: "12 passing\n" }
+  - {
+      kind: agent_result,
+      node: reviewer,
+      result: settled,
+      text: "Limits look right.\n\nVERDICT: APPROVE\n",
+    }
+  - { kind: guard_observation, node: reviewer, changed: false }
+expect:
+  - {
+      type: run_started,
+      run_id: run-1,
+      seq: 1,
+      ts: '2026-09-13T09:00:00Z',
+      pipeline: feature-loop,
+      task: Add rate limiting to /api/upload,
+    }
+  - {
+      type: node_started,
+      run_id: run-1,
+      seq: 2,
+      ts: '2026-09-13T09:00:01Z',
+      node: implementer,
+      round: 1,
+    }
+  - {
+      type: node_finished,
+      run_id: run-1,
+      seq: 3,
+      ts: '2026-09-13T09:10:00Z',
+      node: implementer,
+      round: 1,
+      outcome: done,
+    }
+  - {
+      type: node_started,
+      run_id: run-1,
+      seq: 4,
+      ts: '2026-09-13T09:10:01Z',
+      node: test_gate,
+      round: 1,
+    }
+  - {
+      type: handoff_written,
+      run_id: run-1,
+      seq: 5,
+      ts: '2026-09-13T09:11:00Z',
+      node: test_gate,
+      round: 1,
+      path: handoffs/r1-test_gate-1.txt,
+    }
+  - {
+      type: node_finished,
+      run_id: run-1,
+      seq: 6,
+      ts: '2026-09-13T09:11:01Z',
+      node: test_gate,
+      round: 1,
+      outcome: pass,
+    }
+  - {
+      type: node_started,
+      run_id: run-1,
+      seq: 7,
+      ts: '2026-09-13T09:11:02Z',
+      node: reviewer,
+      round: 1,
+    }
+  - {
+      type: node_finished,
+      run_id: run-1,
+      seq: 8,
+      ts: '2026-09-13T09:15:00Z',
+      node: reviewer,
+      round: 1,
+      outcome: approve,
+    }
+  - { type: node_started, run_id: run-1, seq: 9, ts: '2026-09-13T09:15:01Z', node: done, round: 1 }
+  - { type: run_finished, run_id: run-1, seq: 10, ts: '2026-09-13T09:15:02Z', status: done }
+side_effects:
+  - assert: no_git_writes
+    detail: R14. The engine performs no commit, reset or checkout at any point in this run. A later engine test observes this by running against a scratch repository and asserting the git ref log and index are unchanged.
+  - assert: guard_baseline_preserved
+    detail: R6. The reviewer is read-only, so a fresh snapshot is taken before its turn and compared after it. A later runtime test observes the snapshot/compare pair around the reviewer turn only.

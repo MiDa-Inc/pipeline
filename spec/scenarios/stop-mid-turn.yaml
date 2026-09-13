@@ -1,0 +1,31 @@
+name: stop-mid-turn
+covers: [R13, R14]
+pipeline: reference
+task: Add rate limiting to /api/upload
+inputs:
+  - { kind: operator_action, action: stop }
+expect:
+  - {
+      type: run_started,
+      run_id: run-11,
+      seq: 1,
+      ts: '2026-09-13T09:00:00Z',
+      pipeline: feature-loop,
+      task: Add rate limiting to /api/upload,
+    }
+  - {
+      type: node_started,
+      run_id: run-11,
+      seq: 2,
+      ts: '2026-09-13T09:00:01Z',
+      node: implementer,
+      round: 1,
+    }
+  - { type: run_finished, run_id: run-11, seq: 3, ts: '2026-09-13T09:02:00Z', status: stopped }
+side_effects:
+  - assert: no_events_after_run_finished
+    detail: R13. The implementer entry is left unterminated, with no node_finished and no escalated. A result arriving after the stop must not append any event. A later engine test observes this by delivering a late result and asserting events.jsonl is unchanged.
+  - assert: panes_left_running
+    detail: R13. The engine cancels its own observation but does not kill the agent pane. Stopping orchestration does not guarantee the already-running agent stops producing side effects, including writes to the working tree.
+  - assert: no_git_writes
+    detail: R14. Stop performs no git operation either; the engine never cleans up by resetting or checking out.

@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 import Ajv2020 from 'ajv/dist/2020.js';
@@ -11,8 +11,6 @@ import { describe, expect, it } from 'vitest';
  *
  * These tests check that the schemas accept well-formed data and reject malformed data.
  * They do NOT execute a pipeline and prove nothing about whether an engine obeys docs/SPEC.md.
- * Fixture discovery, cross-file reference resolution, unique names, R1-R15 coverage and the
- * twelve required scenarios are 05c.
  */
 const specUrl = (name: string) => fileURLToPath(new URL(`../../../spec/${name}`, import.meta.url));
 const fixtureUrl = (name: string) =>
@@ -198,5 +196,229 @@ describe('scenario.schema.json', () => {
   it('rejects the invalid YAML fixture', () => {
     const broken = parseYaml(readFileSync(fixtureUrl('invalid-scenario.yaml'), 'utf8')) as object;
     expect(validateScenario(broken)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fixture discovery and cross-file checks (05c)
+// ---------------------------------------------------------------------------
+
+interface Pipeline {
+  name: string;
+  start: string;
+  nodes: Record<string, { type: string; next?: Record<string, string | { to: string }> }>;
+}
+interface Scenario {
+  name: string;
+  covers: string[];
+  pipeline: string;
+  inputs: { node?: string }[];
+  expect: { type: string; node?: string }[];
+}
+
+const loadDir = <T>(dir: string): [string, T][] =>
+  readdirSync(specUrl(dir))
+    .filter((f) => f.endsWith('.yaml'))
+    .map((f) => [f, parseYaml(readFileSync(specUrl(`${dir}/${f}`), 'utf8')) as T]);
+
+const pipelines = loadDir<Pipeline>('pipelines');
+const scenarios = loadDir<Scenario>('scenarios');
+const byBasename = new Map(pipelines.map(([f, p]) => [f.replace(/\.yaml$/, ''), p]));
+const validatePipeline = ajv.compile(readJson(specUrl('pipelines/reference.schema.json')));
+
+const REQUIRED = [
+  'approve-round-1',
+  'gate-fail-then-pass',
+  'revise-twice',
+  'max-rounds',
+  'blocked',
+  'timeout',
+  'missing-verdict',
+  'guard-violation',
+  'unrouted-port',
+  'resume-after-blocked',
+  'resume-with-extra-rounds',
+  'stop-mid-turn',
+];
+const ALL_RULES = Array.from({ length: 15 }, (_, i) => `R${i + 1}`);
+const edgeTarget = (e: string | { to: string }) => (typeof e === 'string' ? e : e.to);
+
+describe('fixture discovery', () => {
+  it('finds at least one pipeline and the twelve scenarios', () => {
+    expect(pipelines.length).toBeGreaterThan(0);
+    expect(scenarios.length).toBe(REQUIRED.length);
+  });
+
+  it.each(pipelines.map(([f]) => f))('validates pipeline %s', (file) => {
+    expect(validatePipeline(byBasename.get(file.replace(/\.yaml$/, '')))).toBe(true);
+  });
+
+  it.each(scenarios.map(([f]) => f))('validates scenario %s', (file) => {
+    expect(validateScenario(scenarios.find(([n]) => n === file)?.[1])).toBe(true);
+  });
+
+  it.each(scenarios.map(([f]) => f))(
+    'validates every expected event of %s individually',
+    (file) => {
+      const s = scenarios.find(([n]) => n === file)?.[1];
+      for (const e of s?.expect ?? []) expect(validateEvent?.(e)).toBe(true);
+    },
+  );
+});
+
+const unresolvedPipeline = (s: Scenario, known: Map<string, Pipeline>) =>
+  known.has(s.pipeline) ? [] : [s.pipeline];
+const unknownNodes = (s: Scenario, p: Pipeline) => {
+  const nodes = new Set(Object.keys(p.nodes));
+  const named = [...s.inputs.map((i) => i.node), ...s.expect.map((e) => e.node)];
+  return named.filter((n): n is string => typeof n === 'string' && !nodes.has(n));
+};
+const danglingEdges = (p: Pipeline) => {
+  const nodes = new Set(Object.keys(p.nodes));
+  const targets = Object.values(p.nodes).flatMap((n) =>
+    Object.values(n.next ?? {}).map(edgeTarget),
+  );
+  return [...targets, p.start].filter((target) => !nodes.has(target));
+};
+const missingRules = (list: Scenario[]) => {
+  const covered = new Set(list.flatMap((s) => s.covers));
+  return ALL_RULES.filter((r) => !covered.has(r));
+};
+const duplicateNames = (list: Scenario[]) => {
+  const seen = new Set<string>();
+  return list.map((s) => s.name).filter((n) => (seen.has(n) ? true : (seen.add(n), false)));
+};
+
+describe('cross-file references', () => {
+  it('gives every scenario a unique name matching its filename', () => {
+    expect(duplicateNames(scenarios.map(([, s]) => s))).toEqual([]);
+    for (const [file, s] of scenarios) expect(`${s.name}.yaml`).toBe(file);
+  });
+
+  it.each(scenarios.map(([, s]) => s.name))('resolves the pipeline named by %s', (name) => {
+    const s = scenarios.find(([, x]) => x.name === name)![1];
+    expect(unresolvedPipeline(s, byBasename)).toEqual([]);
+  });
+
+  it.each(scenarios.map(([, s]) => s.name))('names only existing nodes in %s', (name) => {
+    const s = scenarios.find(([, x]) => x.name === name)![1];
+    expect(unknownNodes(s, byBasename.get(s.pipeline)!)).toEqual([]);
+  });
+
+  it.each(pipelines.map(([f]) => f))('routes every edge of %s to an existing node', (file) => {
+    expect(danglingEdges(byBasename.get(file.replace(/\.yaml$/, ''))!)).toEqual([]);
+  });
+});
+
+const pipelineWith = (mutate: (p: Record<string, never>) => void) => {
+  const p = structuredClone(byBasename.get('reference')) as unknown as Record<string, never>;
+  mutate(p);
+  return p;
+};
+
+const invalidPipelines: Record<string, object> = {
+  'gate missing its required run field': pipelineWith((p) => {
+    delete (p.nodes as Record<string, Record<string, unknown>>).test_gate.run;
+  }),
+  'gate missing its required timeout': pipelineWith((p) => {
+    delete (p.nodes as Record<string, Record<string, unknown>>).test_gate.timeout;
+  }),
+  'unknown node type': pipelineWith((p) => {
+    (p.nodes as Record<string, Record<string, unknown>>).test_gate.type = 'webhook';
+  }),
+  'invalid agent permission': pipelineWith((p) => {
+    (p.nodes as Record<string, Record<string, unknown>>).reviewer.permission = 'write';
+  }),
+  'malformed duration': pipelineWith((p) => {
+    (p.nodes as Record<string, Record<string, unknown>>).test_gate.timeout = '10 minutes';
+  }),
+  'non-positive round limit': pipelineWith((p) => {
+    (p.limits as Record<string, unknown>).max_rounds = 0;
+  }),
+  'unexpected top-level property': pipelineWith((p) => {
+    (p as Record<string, unknown>).retries = 3;
+  }),
+  'unexpected node property': pipelineWith((p) => {
+    (p.nodes as Record<string, Record<string, unknown>>).reviewer.model = 'sonnet';
+  }),
+  'port that the node type does not define': pipelineWith((p) => {
+    (
+      (p.nodes as Record<string, Record<string, Record<string, unknown>>>).test_gate.next as Record<
+        string,
+        unknown
+      >
+    ).approve = 'done';
+  }),
+  'edge long form missing its message': pipelineWith((p) => {
+    (
+      (p.nodes as Record<string, Record<string, Record<string, unknown>>>).reviewer.next as Record<
+        string,
+        unknown
+      >
+    ).revise = {
+      to: 'implementer',
+    };
+  }),
+  'wrong schema version': pipelineWith((p) => {
+    (p as Record<string, unknown>).version = 2;
+  }),
+  'empty object': {},
+};
+
+describe('reference.schema.json rejects malformed pipelines', () => {
+  it('accepts the unmodified reference pipeline, so each mutation is the only defect', () => {
+    expect(validatePipeline(pipelineWith(() => {}))).toBe(true);
+  });
+
+  it.each(Object.keys(invalidPipelines))('rejects a pipeline with %s', (name) => {
+    expect(validatePipeline(invalidPipelines[name])).toBe(false);
+  });
+});
+
+describe('rule coverage', () => {
+  it('covers every rule R1-R15 across the scenario set', () => {
+    const covered = new Set(scenarios.flatMap(([, s]) => s.covers));
+    expect(ALL_RULES.filter((r) => !covered.has(r))).toEqual([]);
+  });
+
+  it('contains all twelve required scenarios and no extras', () => {
+    expect(scenarios.map(([, s]) => s.name).sort()).toEqual([...REQUIRED].sort());
+  });
+});
+
+describe('cross-file checks reject broken fixtures', () => {
+  const good = scenarios.find(([, s]) => s.name === 'approve-round-1')![1];
+  const reference = byBasename.get('reference')!;
+
+  it('flags a scenario naming a pipeline that does not exist', () => {
+    expect(unresolvedPipeline({ ...good, pipeline: 'no-such-pipeline' }, byBasename)).toEqual([
+      'no-such-pipeline',
+    ]);
+  });
+
+  it('flags a scenario naming a node the pipeline does not define', () => {
+    const broken = { ...good, inputs: [...good.inputs, { node: 'reviewer_2' }] };
+    expect(unknownNodes(broken, reference)).toEqual(['reviewer_2']);
+  });
+
+  it('flags an expected event naming an unknown node', () => {
+    const broken = { ...good, expect: [...good.expect, { type: 'node_started', node: 'ghost' }] };
+    expect(unknownNodes(broken, reference)).toEqual(['ghost']);
+  });
+
+  it('flags an edge pointing at a node that does not exist', () => {
+    const broken: Pipeline = {
+      ...reference,
+      nodes: { ...reference.nodes, test_gate: { type: 'gate', next: { pass: 'nowhere' } } },
+    };
+    expect(danglingEdges(broken)).toEqual(['nowhere']);
+  });
+
+  it('flags an incomplete covers set', () => {
+    expect(missingRules([{ ...good, covers: ['R1', 'R2'] }])).toHaveLength(13);
+  });
+
+  it('flags a duplicate scenario name', () => {
+    expect(duplicateNames([good, { ...good }])).toEqual(['approve-round-1']);
   });
 });

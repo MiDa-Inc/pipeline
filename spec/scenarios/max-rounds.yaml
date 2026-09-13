@@ -1,0 +1,177 @@
+name: max-rounds
+covers: [R2, R3, R10]
+pipeline: tight-rounds
+task: Add rate limiting to /api/upload
+inputs:
+  - { kind: agent_result, node: implementer, result: settled, text: "First implementation.\n" }
+  - { kind: gate_result, node: test_gate, exit_status: 0, output: "12 passing\n" }
+  - { kind: agent_result, node: reviewer, result: settled, text: "VERDICT: REVISE\n" }
+  - { kind: guard_observation, node: reviewer, changed: false }
+  - { kind: agent_result, node: implementer, result: settled, text: "Second attempt.\n" }
+  - { kind: gate_result, node: test_gate, exit_status: 0, output: "12 passing\n" }
+  - {
+      kind: agent_result,
+      node: reviewer,
+      result: settled,
+      text: "Still wrong.\n\nVERDICT: REVISE\n",
+    }
+  - { kind: guard_observation, node: reviewer, changed: false }
+expect:
+  - {
+      type: run_started,
+      run_id: run-4,
+      seq: 1,
+      ts: '2026-09-13T09:00:00Z',
+      pipeline: feature-loop-tight,
+      task: Add rate limiting to /api/upload,
+    }
+  - {
+      type: node_started,
+      run_id: run-4,
+      seq: 2,
+      ts: '2026-09-13T09:00:01Z',
+      node: implementer,
+      round: 1,
+    }
+  - {
+      type: node_finished,
+      run_id: run-4,
+      seq: 3,
+      ts: '2026-09-13T09:05:00Z',
+      node: implementer,
+      round: 1,
+      outcome: done,
+    }
+  - {
+      type: node_started,
+      run_id: run-4,
+      seq: 4,
+      ts: '2026-09-13T09:05:01Z',
+      node: test_gate,
+      round: 1,
+    }
+  - {
+      type: handoff_written,
+      run_id: run-4,
+      seq: 5,
+      ts: '2026-09-13T09:06:00Z',
+      node: test_gate,
+      round: 1,
+      path: handoffs/r1-test_gate-1.txt,
+    }
+  - {
+      type: node_finished,
+      run_id: run-4,
+      seq: 6,
+      ts: '2026-09-13T09:06:01Z',
+      node: test_gate,
+      round: 1,
+      outcome: pass,
+    }
+  - {
+      type: node_started,
+      run_id: run-4,
+      seq: 7,
+      ts: '2026-09-13T09:06:02Z',
+      node: reviewer,
+      round: 1,
+    }
+  - {
+      type: handoff_written,
+      run_id: run-4,
+      seq: 8,
+      ts: '2026-09-13T09:09:00Z',
+      node: reviewer,
+      round: 1,
+      path: handoffs/r1-reviewer-1.txt,
+    }
+  - {
+      type: node_finished,
+      run_id: run-4,
+      seq: 9,
+      ts: '2026-09-13T09:09:01Z',
+      node: reviewer,
+      round: 1,
+      outcome: revise,
+    }
+  - {
+      type: node_started,
+      run_id: run-4,
+      seq: 10,
+      ts: '2026-09-13T09:09:02Z',
+      node: implementer,
+      round: 2,
+    }
+  - {
+      type: node_finished,
+      run_id: run-4,
+      seq: 11,
+      ts: '2026-09-13T09:14:00Z',
+      node: implementer,
+      round: 2,
+      outcome: done,
+    }
+  - {
+      type: node_started,
+      run_id: run-4,
+      seq: 12,
+      ts: '2026-09-13T09:14:01Z',
+      node: test_gate,
+      round: 2,
+    }
+  - {
+      type: handoff_written,
+      run_id: run-4,
+      seq: 13,
+      ts: '2026-09-13T09:15:00Z',
+      node: test_gate,
+      round: 2,
+      path: handoffs/r2-test_gate-1.txt,
+    }
+  - {
+      type: node_finished,
+      run_id: run-4,
+      seq: 14,
+      ts: '2026-09-13T09:15:01Z',
+      node: test_gate,
+      round: 2,
+      outcome: pass,
+    }
+  - {
+      type: node_started,
+      run_id: run-4,
+      seq: 15,
+      ts: '2026-09-13T09:15:02Z',
+      node: reviewer,
+      round: 2,
+    }
+  - {
+      type: handoff_written,
+      run_id: run-4,
+      seq: 16,
+      ts: '2026-09-13T09:18:00Z',
+      node: reviewer,
+      round: 2,
+      path: handoffs/r2-reviewer-1.txt,
+    }
+  - {
+      type: node_finished,
+      run_id: run-4,
+      seq: 17,
+      ts: '2026-09-13T09:18:01Z',
+      node: reviewer,
+      round: 2,
+      outcome: revise,
+    }
+  - {
+      type: escalated,
+      run_id: run-4,
+      seq: 18,
+      ts: '2026-09-13T09:18:02Z',
+      node: implementer,
+      round: 2,
+      reason: max_rounds,
+    }
+side_effects:
+  - assert: no_prompt_resubmission
+    detail: R3. The refused entry into round 3 sends no prompt at all, so the implementer receives exactly two prompts in this run. A later engine test observes the count of prompts submitted per node.

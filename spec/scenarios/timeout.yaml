@@ -1,0 +1,35 @@
+name: timeout
+covers: [R4, R10]
+pipeline: reference
+task: Add rate limiting to /api/upload
+inputs:
+  - { kind: deadline_expiry, node: implementer }
+expect:
+  - {
+      type: run_started,
+      run_id: run-8,
+      seq: 1,
+      ts: '2026-09-13T09:00:00Z',
+      pipeline: feature-loop,
+      task: Add rate limiting to /api/upload,
+    }
+  - {
+      type: node_started,
+      run_id: run-8,
+      seq: 2,
+      ts: '2026-09-13T09:00:01Z',
+      node: implementer,
+      round: 1,
+    }
+  - {
+      type: escalated,
+      run_id: run-8,
+      seq: 3,
+      ts: '2026-09-13T10:00:01Z',
+      node: implementer,
+      round: 1,
+      reason: timeout,
+    }
+side_effects:
+  - assert: no_prompt_resubmission
+    detail: R4 and R12. A timeout can occur after the prompt was delivered (step 04), so the engine must never resend on timeout. A later runtime test observes that exactly one prompt was submitted to the implementer.

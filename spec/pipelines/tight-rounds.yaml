@@ -1,0 +1,36 @@
+version: 1
+name: feature-loop-tight
+start: implementer
+limits:
+  max_rounds: 2
+  turn_timeout: 60m
+nodes:
+  implementer:
+    type: agent
+    profile: claude-code
+    permission: edit
+    role: >
+      You implement the task. Write code and tests. Stop when finished. Never commit.
+    next:
+      done: test_gate
+  test_gate:
+    type: gate
+    run: npm test
+    timeout: 10m
+    next:
+      pass: reviewer
+      fail: implementer
+  reviewer:
+    type: agent
+    profile: codex
+    permission: read-only
+    verdict: true
+    role: >
+      You review the current diff against the task. Never edit files.
+    next:
+      approve: done
+      revise:
+        to: implementer
+        message: 'The reviewer asked for changes. Findings: {handoff_file}. Address every finding, then stop.'
+  done:
+    type: end
