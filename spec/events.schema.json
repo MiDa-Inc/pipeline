@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pipeline.local/spec/events.schema.json",
+  "title": "Pipeline run-log event",
+  "description": "One object from events.jsonl. Encodes docs/SPEC.md section 3. Common fields are declared at the root and each branch adds only its own payload; unevaluatedProperties closes the union so unknown fields are rejected without restating the common fields seven times.",
+  "type": "object",
+  "properties": {
+    "type": {
+      "enum": [
+        "run_started",
+        "node_started",
+        "handoff_written",
+        "node_finished",
+        "escalated",
+        "resumed",
+        "run_finished"
+      ]
+    },
+    "run_id": { "type": "string", "minLength": 1 },
+    "seq": { "type": "integer", "minimum": 1 },
+    "ts": { "type": "string", "format": "date-time" }
+  },
+  "required": ["type", "run_id", "seq", "ts"],
+  "oneOf": [
+    {
+      "title": "run_started",
+      "type": "object",
+      "properties": {
+        "type": { "const": "run_started" },
+        "pipeline": { "type": "string", "minLength": 1 },
+        "task": { "type": "string", "minLength": 1 }
+      },
+      "required": ["type", "pipeline", "task"]
+    },
+    {
+      "title": "node_started",
+      "type": "object",
+      "properties": {
+        "type": { "const": "node_started" },
+        "node": { "$ref": "#/$defs/nodeName" },
+        "round": { "$ref": "#/$defs/round" }
+      },
+      "required": ["type", "node", "round"]
+    },
+    {
+      "title": "handoff_written",
+      "type": "object",
+      "properties": {
+        "type": { "const": "handoff_written" },
+        "node": { "$ref": "#/$defs/nodeName" },
+        "round": { "$ref": "#/$defs/round" },
+        "path": { "$ref": "#/$defs/relativePath" }
+      },
+      "required": ["type", "node", "round", "path"]
+    },
+    {
+      "title": "node_finished",
+      "type": "object",
+      "properties": {
+        "type": { "const": "node_finished" },
+        "node": { "$ref": "#/$defs/nodeName" },
+        "round": { "$ref": "#/$defs/round" },
+        "outcome": { "enum": ["done", "approve", "revise", "pass", "fail"] }
+      },
+      "required": ["type", "node", "round", "outcome"]
+    },
+    {
+      "title": "escalated",
+      "type": "object",
+      "properties": {
+        "type": { "const": "escalated" },
+        "node": { "$ref": "#/$defs/nodeName" },
+        "round": { "$ref": "#/$defs/round" },
+        "reason": {
+          "enum": [
+            "blocked",
+            "timeout",
+            "missing_verdict",
+            "max_rounds",
+            "guard_violation",
+            "unrouted"
+          ]
+        }
+      },
+      "required": ["type", "node", "round", "reason"]
+    },
+    {
+      "title": "resumed",
+      "type": "object",
+      "description": "extra_rounds is present only when the resume granted rounds (SPEC R12).",
+      "properties": {
+        "type": { "const": "resumed" },
+        "node": { "$ref": "#/$defs/nodeName" },
+        "round": { "$ref": "#/$defs/round" },
+        "extra_rounds": { "type": "integer", "minimum": 1 }
+      },
+      "required": ["type", "node", "round"]
+    },
+    {
+      "title": "run_finished",
+      "type": "object",
+      "properties": {
+        "type": { "const": "run_finished" },
+        "status": { "enum": ["done", "stopped"] }
+      },
+      "required": ["type", "status"]
+    }
+  ],
+  "unevaluatedProperties": false,
+  "$defs": {
+    "nodeName": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_-]*$" },
+    "round": { "type": "integer", "minimum": 1 },
+    "relativePath": {
+      "description": "Relative to the run folder; no absolute paths and no parent traversal (SPEC section 3).",
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?!.*(^|/)\\.\\.(/|$)).+$"
+    }
+  }
+}

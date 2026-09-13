@@ -1,0 +1,162 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pipeline.local/spec/scenario.schema.json",
+  "title": "Golden scenario",
+  "description": "Reference data for one run of one pipeline. Inputs are scripted; expected events are written out explicitly, never generated. Encodes docs/SPEC.md; behaviour is not implemented here.",
+  "type": "object",
+  "properties": {
+    "name": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" },
+    "covers": {
+      "description": "Rules this scenario actually exercises or constrains.",
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "R1",
+          "R2",
+          "R3",
+          "R4",
+          "R5",
+          "R6",
+          "R7",
+          "R8",
+          "R9",
+          "R10",
+          "R11",
+          "R12",
+          "R13",
+          "R14",
+          "R15"
+        ]
+      }
+    },
+    "pipeline": {
+      "description": "Basename of a fixture in spec/pipelines/. Resolution is checked in 05c.",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*$"
+    },
+    "task": { "type": "string", "minLength": 1 },
+    "inputs": {
+      "description": "Every scripted observation and operator action, in the order the engine observes them (SPEC R15).",
+      "type": "array",
+      "items": { "$ref": "#/$defs/input" }
+    },
+    "expect": {
+      "description": "The complete expected event sequence. No omissions and no ellipses.",
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "https://pipeline.local/spec/events.schema.json" }
+    },
+    "side_effects": {
+      "description": "Expectations events alone cannot express (SPEC R12, R13, R14).",
+      "type": "array",
+      "items": { "$ref": "#/$defs/sideEffect" }
+    }
+  },
+  "required": ["name", "covers", "pipeline", "task", "inputs", "expect"],
+  "additionalProperties": false,
+  "$defs": {
+    "nodeName": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_-]*$" },
+    "input": {
+      "type": "object",
+      "oneOf": [
+        {
+          "title": "agent_result_settled",
+          "description": "Completion was established AND turn-attributable text is available (SPEC R4), so text is required. The verdict, if any, is parsed from this text.",
+          "type": "object",
+          "properties": {
+            "kind": { "const": "agent_result" },
+            "node": { "$ref": "#/$defs/nodeName" },
+            "result": { "const": "settled" },
+            "text": { "type": "string", "minLength": 1 }
+          },
+          "required": ["kind", "node", "result", "text"],
+          "additionalProperties": false
+        },
+        {
+          "title": "agent_result_without_answer",
+          "description": "'blocked' is a permission dialog; 'unconfirmed' is a settled lifecycle state with no attributable answer (step 04). Neither carries text, so none is permitted here.",
+          "type": "object",
+          "properties": {
+            "kind": { "const": "agent_result" },
+            "node": { "$ref": "#/$defs/nodeName" },
+            "result": { "enum": ["blocked", "unconfirmed"] }
+          },
+          "required": ["kind", "node", "result"],
+          "additionalProperties": false
+        },
+        {
+          "title": "gate_result",
+          "description": "A gate execution that actually completed. The outcome comes from a real process exit status (SPEC R7); a gate that never exits is expressed as a deadline_expiry instead.",
+          "type": "object",
+          "properties": {
+            "kind": { "const": "gate_result" },
+            "node": { "$ref": "#/$defs/nodeName" },
+            "exit_status": { "type": "integer", "minimum": 0 },
+            "output": {
+              "description": "The command's output. Required, and may be empty: SPEC R7 saves the last lines as a handoff, so a scenario must be able to state those contents exactly. A gate that produced no output scripts an empty string rather than omitting the field.",
+              "type": "string"
+            }
+          },
+          "required": ["kind", "node", "exit_status", "output"],
+          "additionalProperties": false
+        },
+        {
+          "title": "guard_observation",
+          "description": "Working-tree comparison against the turn's effective baseline (SPEC R6).",
+          "type": "object",
+          "properties": {
+            "kind": { "const": "guard_observation" },
+            "node": { "$ref": "#/$defs/nodeName" },
+            "changed": { "type": "boolean" }
+          },
+          "required": ["kind", "node", "changed"],
+          "additionalProperties": false
+        },
+        {
+          "title": "deadline_expiry",
+          "description": "The turn's observation deadline elapses before a result is observed (SPEC R4, R7, R12).",
+          "type": "object",
+          "properties": {
+            "kind": { "const": "deadline_expiry" },
+            "node": { "$ref": "#/$defs/nodeName" }
+          },
+          "required": ["kind", "node"],
+          "additionalProperties": false
+        },
+        {
+          "title": "operator_action",
+          "description": "A scenario input, never a run-log event (SPEC section 5).",
+          "type": "object",
+          "properties": {
+            "kind": { "const": "operator_action" },
+            "action": { "enum": ["resume", "stop"] },
+            "extra_rounds": { "type": "integer", "minimum": 1 },
+            "guard_resolution": { "enum": ["accept", "stop"] }
+          },
+          "required": ["kind", "action"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "sideEffect": {
+      "type": "object",
+      "properties": {
+        "assert": {
+          "enum": [
+            "no_prompt_resubmission",
+            "no_gate_rerun",
+            "no_git_writes",
+            "panes_left_running",
+            "no_events_after_run_finished",
+            "guard_baseline_preserved"
+          ]
+        },
+        "detail": { "type": "string", "minLength": 1 }
+      },
+      "required": ["assert", "detail"],
+      "additionalProperties": false
+    }
+  }
+}

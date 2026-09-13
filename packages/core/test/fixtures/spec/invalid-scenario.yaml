@@ -1,0 +1,17 @@
+# Invalid on purpose: covers names a rule that does not exist, and the expected
+# node_finished event omits its required outcome.
+name: harness-broken
+covers: [R1, R99]
+pipeline: reference
+task: Add rate limiting to /api/upload
+inputs:
+  - { kind: agent_result, node: implementer, result: settled, text: "done\n" }
+expect:
+  - {
+      type: node_finished,
+      run_id: r1,
+      seq: 1,
+      ts: '2026-09-13T10:00:00Z',
+      node: implementer,
+      round: 1,
+    }
