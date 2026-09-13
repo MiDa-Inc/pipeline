@@ -1,0 +1,186 @@
+:root {
+  --bg: #f6f7f9;
+  --panel: #ffffff;
+  --ink: #15181d;
+  --muted: #5c6470;
+  --line: #d6dae1;
+  --accent: #2f6feb;
+  --agent: #2f6feb;
+  --gate: #8a5cf6;
+  --end: #1f9d63;
+  font-family:
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    'Segoe UI',
+    sans-serif;
+  color: var(--ink);
+}
+
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  background: var(--bg);
+}
+
+.app {
+  display: grid;
+  grid-template-columns: 1fr 320px;
+  grid-template-rows: 56px 1fr;
+  grid-template-areas: 'top top' 'canvas inspector';
+  height: 100vh;
+}
+
+.topbar {
+  grid-area: top;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 0 20px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+.topbar h1 {
+  font-size: 16px;
+  margin: 0;
+}
+.topbar__meta {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.canvas {
+  grid-area: canvas;
+  min-width: 0;
+}
+
+/* Nodes ------------------------------------------------------------------ */
+.node {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 190px;
+  padding: 10px 12px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--agent);
+  border-radius: 8px;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 8%);
+}
+.node--gate {
+  border-left-color: var(--gate);
+}
+.node--end {
+  border-left-color: var(--end);
+}
+.node[data-selected] {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgb(47 111 235 / 25%);
+}
+.node__kind {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+.node__name {
+  font-size: 15px;
+  font-weight: 600;
+}
+.node__subtitle {
+  font-size: 12px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.react-flow__edge-text {
+  font-size: 11px;
+}
+.edge--back .react-flow__edge-path {
+  stroke-dasharray: 5 4;
+}
+
+/* Inspector -------------------------------------------------------------- */
+.inspector {
+  grid-area: inspector;
+  overflow-y: auto;
+  padding: 16px;
+  background: var(--panel);
+  border-left: 1px solid var(--line);
+}
+.inspector__head h2 {
+  font-size: 16px;
+  margin: 2px 0 14px;
+}
+.inspector__kind {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+.inspector__empty {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.inspector label {
+  display: block;
+  margin-bottom: 14px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+.inspector label.inspector__check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 500;
+}
+.inspector input[type='text'],
+.inspector input:not([type]),
+.inspector select,
+.inspector textarea {
+  display: block;
+  width: 100%;
+  margin-top: 5px;
+  padding: 7px 9px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--ink);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.inspector label.inspector__check input {
+  width: auto;
+  margin: 0;
+}
+.inspector textarea {
+  resize: vertical;
+  line-height: 1.45;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/*
+ * React Flow puts focus on its own node wrapper and clears the outline there, with a rule more
+ * specific than a bare :focus-visible. Move the ring onto our card, and keep it distinct from the
+ * selection ring (a box-shadow) so focus and selection stay separately visible.
+ */
+.react-flow__node:focus,
+.react-flow__node:focus-visible {
+  outline: none;
+}
+.react-flow__node:focus .node,
+.react-flow__node:focus-visible .node {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
