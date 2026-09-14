@@ -1,0 +1,450 @@
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+import Ajv2020 from 'ajv/dist/2020.js';
+import addFormats from 'ajv-formats';
+import { beforeAll, describe, expect, it } from 'vitest';
+
+import {
+  openRunLog,
+  readEvents,
+  runPaths,
+  RunLogError,
+  type EventPayload,
+  type PipelineEvent,
+} from '../src/runlog/index.js';
+
+const ajv = new Ajv2020({ strict: true, allErrors: true });
+addFormats(ajv);
+const validateEvent = ajv.compile(
+  JSON.parse(
+    readFileSync(
+      fileURLToPath(new URL('../../../spec/events.schema.json', import.meta.url)),
+      'utf8',
+    ),
+  ) as object,
+);
+const valid = (event: PipelineEvent): true | string =>
+  validateEvent(event) ? true : JSON.stringify(validateEvent.errors);
+
+const base = () => mkdtempSync(join(tmpdir(), 'pipeline-runlog-'));
+const clock = () => {
+  let t = Date.parse('2026-09-13T09:00:00Z');
+  return () => new Date((t += 1000));
+};
+/** One of every event type, so "every event written" is not a sample of one. */
+const script: EventPayload[] = [
+  { type: 'run_started', pipeline: 'feature-loop', task: 'Add rate limiting' },
+  { type: 'node_started', node: 'implementer', round: 1 },
+  { type: 'handoff_written', node: 'implementer', round: 1, path: 'handoffs/r1-implementer-1.txt' },
+  { type: 'node_finished', node: 'implementer', round: 1, outcome: 'done' },
+  { type: 'escalated', node: 'reviewer', round: 1, reason: 'missing_verdict' },
+  { type: 'resumed', node: 'reviewer', round: 1, extra_rounds: 2 },
+  { type: 'resumed', node: 'reviewer', round: 1 },
+  { type: 'run_finished', status: 'done' },
+];
+
+describe('the run folder', () => {
+  it('lays out .pipeline/runs/<run-id>/ with handoffs, and creates it on open', () => {
+    const dir = base();
+    const paths = runPaths(dir, 'run-2');
+    expect(paths.root).toBe(join(dir, '.pipeline', 'runs', 'run-2'));
+    expect(paths.events).toBe(join(paths.root, 'events.jsonl'));
+    expect(paths.state).toBe(join(paths.root, 'state.json'));
+    expect(paths.handoffs).toBe(join(paths.root, 'handoffs'));
+    expect(openRunLog(dir, 'run-2').paths.handoffs).toBe(paths.handoffs);
+    expect(readEvents(paths.events)).toEqual({ events: [], complete: true }); // no log yet
+  });
+
+  it.each(['..', 'a/b', '/abs', '.hidden', '', 'a\\b'])(
+    'refuses the run id %j rather than reaching outside the runs directory',
+    (runId) => {
+      expect(() => runPaths(base(), runId)).toThrow(/invalid run id/);
+    },
+  );
+
+  it('preserves an existing run, and other runs, when reopened', () => {
+    const dir = base();
+    openRunLog(dir, 'run-1', { now: clock() }).append(script[0] as EventPayload);
+    openRunLog(dir, 'other', { now: clock() }).append(script[0] as EventPayload);
+    const reopened = openRunLog(dir, 'run-1', { now: clock() });
+    expect(reopened.existing).toHaveLength(1); // not clobbered
+    expect(reopened.nextSeq).toBe(2); // continues the sequence
+    reopened.append(script[1] as EventPayload);
+    expect(readEvents(runPaths(dir, 'run-1').events).events).toHaveLength(2);
+    expect(readEvents(runPaths(dir, 'other').events).events).toHaveLength(1);
+  });
+});
+
+describe('appending', () => {
+  const dir = base();
+  let written: PipelineEvent[] = [];
+  beforeAll(() => {
+    const log = openRunLog(dir, 'run-2', { now: clock() });
+    written = script.map((payload) => log.append(payload));
+  });
+
+  it.each(script.map((p, i) => [p.type, i] as const))(
+    'writes a schema-valid %s event',
+    (_type, index) => {
+      expect(valid(written[index] as PipelineEvent)).toBe(true);
+    },
+  );
+
+  it('numbers events from one, strictly increasing with no gaps', () => {
+    expect(written.map((e) => e.seq)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(written.every((e) => e.run_id === 'run-2')).toBe(true);
+  });
+
+  it('appends one JSON object per line, and reads back exactly what was written', () => {
+    const text = readFileSync(runPaths(dir, 'run-2').events, 'utf8');
+    expect(text.endsWith('\n')).toBe(true);
+    expect(text.trimEnd().split('\n')).toHaveLength(script.length);
+    const read = readEvents(runPaths(dir, 'run-2').events);
+    expect(read).toEqual({ events: written, complete: true });
+  });
+
+  it.each([
+    [
+      'fails before writing any bytes',
+      () => {
+        throw new Error('no bytes written');
+      },
+    ],
+    [
+      'fails after writing part of a line',
+      (path: string, line: string) => {
+        appendFileSync(path, line.slice(0, 12));
+        throw new Error('torn write');
+      },
+    ],
+  ] as [string, (path: string, line: string) => void][])(
+    'invalidates the writer when an append %s',
+    (_label, writeLine) => {
+      const dir = base();
+      const good = openRunLog(dir, 'run-3', { now: clock() });
+      good.append(script[0] as EventPayload); // real history, which must survive
+      const log = openRunLog(dir, 'run-3', { now: clock(), writeLine });
+      expect(() => log.append(script[1] as EventPayload)).toThrow(RunLogError);
+      expect(log.nextSeq).toBe(2); // the seq is reused, not skipped
+      // and the handle is finished: it may not write again and bury the damage mid-file
+      expect(() => log.append(script[1] as EventPayload)).toThrow(/writer|append failed/);
+      expect(readEvents(log.paths.events).events[0]).toMatchObject({ seq: 1 }); // history intact
+    },
+  );
+
+  it('leaves a torn prefix as a recoverable tail rather than burying it', () => {
+    const dir = base();
+    const first = openRunLog(dir, 'run-3', { now: clock() });
+    first.append(script[0] as EventPayload);
+    const torn = openRunLog(dir, 'run-3', {
+      now: clock(),
+      writeLine: (path, line) => {
+        appendFileSync(path, line.slice(0, 12));
+        throw new Error('torn write');
+      },
+    });
+    expect(() => torn.append(script[1] as EventPayload)).toThrow();
+    const read = readEvents(torn.paths.events);
+    expect(read.complete).toBe(false);
+    expect(read.events).toHaveLength(1); // the sound prefix
+    expect(read.damagedTail).toMatchObject({ kind: 'unparsable', line: 2 }); // a torn JSON prefix
+    expect(() => openRunLog(dir, 'run-3')).toThrow(RunLogError); // and reopening refuses it
+  });
+
+  it('refuses to append over a tail damaged by someone else', () => {
+    const dir = base();
+    const log = openRunLog(dir, 'run-3', { now: clock() });
+    log.append(script[0] as EventPayload);
+    // another process tore a line after our last append: the valid prefix still ends at our seq,
+    // so only a damaged-tail check stops us writing past it and burying the damage
+    appendFileSync(log.paths.events, '{"type":"nod');
+    expect(readEvents(log.paths.events).events.map((e) => e.seq)).toEqual([1]);
+    expect(() => log.append(script[1] as EventPayload)).toThrow(/damaged tail/);
+    expect(readEvents(log.paths.events).damagedTail).toBeDefined(); // still there, unrepaired
+  });
+
+  it('refuses a second writer rather than duplicating a sequence number', () => {
+    const dir = base();
+    const a = openRunLog(dir, 'run-3', { now: clock() });
+    const b = openRunLog(dir, 'run-3', { now: clock() }); // opened before either wrote
+    a.append(script[0] as EventPayload);
+    expect(() => b.append(script[1] as EventPayload)).toThrow(/expects 0/);
+    expect(() => b.append(script[1] as EventPayload)).toThrow(RunLogError); // stays invalid
+    a.append(script[1] as EventPayload);
+    expect(readEvents(a.paths.events).events.map((e) => e.seq)).toEqual([1, 2]);
+  });
+
+  it('surfaces a read failure that is not a missing log', () => {
+    const dir2 = base();
+    mkdirSync(runPaths(dir2, 'run-5').root, { recursive: true });
+    mkdirSync(runPaths(dir2, 'run-5').events);
+    expect(() => readEvents(runPaths(dir2, 'run-5').events)).toThrow();
+  });
+});
+
+describe('events the reader would reject', () => {
+  it.each([
+    ['a round below one', { type: 'node_started', node: 'implementer', round: 0 }],
+    [
+      'a handoff path escaping the run folder',
+      { type: 'handoff_written', node: 'implementer', round: 1, path: '../outside.txt' },
+    ],
+    ['an unknown outcome', { type: 'node_finished', node: 'a', round: 1, outcome: 'maybe' }],
+  ] as [string, EventPayload][])('refuses to write %s', (_label, bad) => {
+    const dir = base();
+    const log = openRunLog(dir, 'run-7', { now: clock() });
+    log.append(script[0] as EventPayload);
+    const before = readFileSync(log.paths.events, 'utf8');
+    expect(() => log.append(bad)).toThrow(/refusing to append an invalid event/);
+    expect(readFileSync(log.paths.events, 'utf8')).toBe(before); // bytes preserved
+    expect(log.nextSeq).toBe(2); // sequence state preserved
+    // a caller's bad event is not corruption, so the handle stays usable
+    log.append(script[1] as EventPayload);
+    expect(readEvents(log.paths.events).events.map((e) => e.seq)).toEqual([1, 2]);
+  });
+});
+
+describe('ownership', () => {
+  it('rechecks the owner before every append, not only on open', () => {
+    const dir = base();
+    const mine = openRunLog(dir, 'run-8', { now: clock() });
+    mine.append(script[0] as EventPayload);
+    // another run's log, valid and at the same seq, swapped in underneath the open handle
+    const other = openRunLog(dir, 'other', { now: clock() });
+    other.append(script[0] as EventPayload);
+    const replacement = readFileSync(other.paths.events, 'utf8');
+    writeFileSync(mine.paths.events, replacement, 'utf8');
+    expect(() => mine.append(script[1] as EventPayload)).toThrow(
+      /now belongs to run other, not run-8/,
+    );
+    expect(readFileSync(mine.paths.events, 'utf8')).toBe(replacement); // refusal preserves it
+  });
+});
+
+describe('a damaged tail', () => {
+  const withTail = (tail: string) => {
+    const dir = base();
+    const log = openRunLog(dir, 'run-4', { now: clock() });
+    log.append(script[0] as EventPayload);
+    log.append(script[1] as EventPayload);
+    const path = log.paths.events;
+    writeFileSync(path, readFileSync(path, 'utf8') + tail, 'utf8');
+    return { dir, path };
+  };
+
+  it('reports an unparsable final line and returns the valid prefix, not a clean log', () => {
+    const { path } = withTail('{"type":"node_fini\n');
+    const read = readEvents(path);
+    expect(read.complete).toBe(false); // never presented as complete
+    expect(read.events).toHaveLength(2);
+    expect(read.damagedTail).toMatchObject({ kind: 'unparsable', line: 3 });
+  });
+
+  it('reports a valid record with no closing newline, and preserves the file', () => {
+    const { path } = withTail('{"type":"run_finished","run_id":"run-4","seq":3,"ts":"x"}');
+    const before = readFileSync(path, 'utf8');
+    const read = readEvents(path);
+    expect(read.complete).toBe(false);
+    expect(read.events).toHaveLength(2); // the unterminated record is not an event
+    expect(read.damagedTail).toMatchObject({ kind: 'unterminated', line: 3 });
+    expect(read.damagedTail?.text).toContain('run_finished');
+    expect(readFileSync(path, 'utf8')).toBe(before); // no truncation, no repair
+  });
+
+  it.each([
+    ['unparsable', '{"type":"node_fini\n'],
+    ['unterminated', '{"type":"run_finished","run_id":"run-4","seq":3,"ts":"x"}'],
+  ])('refuses to reopen an appender over an %s tail', (_kind, tail) => {
+    const { dir, path } = withTail(tail);
+    const before = readFileSync(path, 'utf8');
+    expect(() => openRunLog(dir, 'run-4')).toThrow(RunLogError);
+    expect(readFileSync(path, 'utf8')).toBe(before);
+  });
+
+  it.each([
+    ['a record that is not an object', 'null'],
+    [
+      'an event with a mistyped field',
+      '{"type":"run_started","run_id":"run-4","seq":3,"ts":"2026-09-13T09:00:00Z","pipeline":"p","task":"t","extra":1}',
+    ],
+    [
+      'a field of the wrong type',
+      '{"type":"node_started","run_id":"run-4","seq":"3","ts":"2026-09-13T09:00:00Z","node":"a","round":1}',
+    ],
+  ])('refuses %s, even as the last line, without touching the file', (_label, record) => {
+    const { path } = withTail(`${record}\n`);
+    const before = readFileSync(path, 'utf8');
+    expect(() => readEvents(path)).toThrow(/not a valid event/);
+    expect(readFileSync(path, 'utf8')).toBe(before);
+  });
+
+  it('refuses a sequence gap and a foreign run id', () => {
+    const gap = withTail(
+      '{"type":"node_finished","run_id":"run-4","seq":9,"ts":"2026-09-13T09:00:00Z","node":"a","round":1,"outcome":"done"}\n',
+    );
+    expect(() => readEvents(gap.path)).toThrow(/breaks the sequence at 3/);
+    const foreign = withTail(
+      '{"type":"node_started","run_id":"other","seq":3,"ts":"2026-09-13T09:00:00Z","node":"a","round":1}\n',
+    );
+    expect(() => readEvents(foreign.path)).toThrow(/does not match run-4/);
+  });
+
+  it('refuses to append to a log belonging to another run', () => {
+    const dir = base();
+    openRunLog(dir, 'run-4', { now: clock() }).append(script[0] as EventPayload);
+    const stolen = runPaths(dir, 'stolen');
+    mkdirSync(stolen.handoffs, { recursive: true });
+    writeFileSync(stolen.events, readFileSync(runPaths(dir, 'run-4').events, 'utf8'), 'utf8');
+    expect(() => openRunLog(dir, 'stolen')).toThrow(/belongs to run run-4, not stolen/);
+  });
+
+  it('treats corruption before the last line as a hard error', () => {
+    const { path } = withTail('');
+    const lines = readFileSync(path, 'utf8').split('\n');
+    writeFileSync(path, `${lines[0]}\nnot json\n${lines[1]}\n`, 'utf8');
+    expect(() => readEvents(path)).toThrow(/not the last line/);
+    expect(() => readEvents(path)).toThrow(RunLogError);
+  });
+
+  it('promises unchanged bytes only when that is true', () => {
+    const dir = base();
+    const log = openRunLog(dir, 'run-9', {
+      now: clock(),
+      writeLine: (path, line) => {
+        appendFileSync(path, line.slice(0, 12));
+        throw new Error('torn write');
+      },
+    });
+    let thrown: RunLogError | undefined;
+    try {
+      log.append(script[0] as EventPayload);
+    } catch (error) {
+      thrown = error as RunLogError;
+    }
+    expect(thrown?.bytes).toBe('uncertain');
+    expect(thrown?.bytesUnchanged).toBe(false);
+    expect(thrown?.message).not.toContain('left untouched');
+    expect(thrown?.message).toMatch(/part of a line may have been written/i);
+    expect(readFileSync(log.paths.events, 'utf8')).toHaveLength(12); // the claim is accurate
+    // faults raised before any write still give the strong assurance
+    const clean = openRunLog(base(), 'run-9', { now: clock() });
+    try {
+      clean.append({ type: 'node_started', node: 'a', round: 0 });
+    } catch (error) {
+      expect((error as RunLogError).bytes).toBe('unchanged');
+      expect((error as RunLogError).message).toContain('left untouched');
+    }
+  });
+
+  it('keeps the append outcome when releasing the lock fails', () => {
+    const dir = base();
+    const stuck = {
+      remove: () => {
+        throw new Error('EACCES: cannot unlink');
+      },
+    };
+    const log = openRunLog(dir, 'run-10', { now: clock(), lock: stuck });
+    // the event commits; a cleanup failure afterwards is not a rejected append
+    const event = log.append(script[0] as EventPayload);
+    expect(event.seq).toBe(1);
+    expect(log.nextSeq).toBe(2); // the counter advanced with the bytes
+    expect(readEvents(log.paths.events).events).toHaveLength(1);
+    // and the cleanup failure is readable without appending again, saying plainly that the event
+    // was written: the bytes did change, and the log is intact rather than possibly torn
+    expect(log.fault).toMatchObject({ fault: 'lock_residue', bytes: 'committed' });
+    expect(log.fault?.bytesUnchanged).toBe(false);
+    expect(log.fault?.message).toMatch(/seq 1 was committed/);
+    expect(log.fault?.message).not.toContain('left untouched');
+    expect(log.fault?.message).not.toMatch(/part of a line/i);
+  });
+
+  it('keeps a partial-write failure visible when releasing the lock also fails', () => {
+    const dir = base();
+    const log = openRunLog(dir, 'run-11', {
+      now: clock(),
+      lock: {
+        remove: () => {
+          throw new Error('EACCES: cannot unlink');
+        },
+      },
+      writeLine: (path, line) => {
+        appendFileSync(path, line.slice(0, 12));
+        throw new Error('torn write');
+      },
+    });
+    let thrown: RunLogError | undefined;
+    try {
+      log.append(script[0] as EventPayload);
+    } catch (error) {
+      thrown = error as RunLogError;
+    }
+    // the write failure is the outcome, not the cleanup error that followed it
+    expect(thrown?.fault).toBe('writer_invalid');
+    expect(thrown?.bytesUnchanged).toBe(false);
+    expect(log.nextSeq).toBe(1); // nothing committed
+  });
+
+  it('keeps the claim failure when removing the unclaimed lock also fails', () => {
+    const dir = base();
+    const log = openRunLog(dir, 'run-13', {
+      now: clock(),
+      lock: {
+        stamp: () => {
+          throw new Error('ENOSPC: no space left on device');
+        },
+        remove: () => {
+          throw new Error('EACCES: permission denied');
+        },
+      },
+    });
+    let thrown: RunLogError | undefined;
+    try {
+      log.append(script[0] as EventPayload);
+    } catch (error) {
+      thrown = error as RunLogError;
+    }
+    // the claim failure is the outcome; the cleanup failure is reported alongside it
+    expect(thrown?.fault).toBe('lock_unavailable');
+    expect(thrown?.bytes).toBe('unchanged');
+    expect(thrown?.message).toMatch(/could not claim/);
+    expect(thrown?.message).toMatch(/ENOSPC/); // the original cause survives
+    expect(thrown?.message).toMatch(/EACCES/); // and so does the cleanup failure
+    expect(thrown?.message).toMatch(/remains/); // naming what an operator must clear
+  });
+
+  it('leaves no lock behind when claiming it fails, and stays usable afterwards', () => {
+    const dir = base();
+    const failing = openRunLog(dir, 'run-12', {
+      now: clock(),
+      lock: {
+        stamp: () => {
+          throw new Error('ENOSPC: no space left on device');
+        },
+      },
+    });
+    expect(() => failing.append(script[0] as EventPayload)).toThrow(/could not claim/);
+    expect(() => failing.append(script[0] as EventPayload)).toThrow(/ENOSPC/); // cause retained
+    expect(existsSync(`${failing.paths.events}.lock`)).toBe(false); // no leaked ownership
+    // a later writer is not locked out by a lock that was never claimed
+    const next = openRunLog(dir, 'run-12', { now: clock() });
+    expect(next.append(script[0] as EventPayload).seq).toBe(1);
+  });
+
+  it('reports where the damage starts, in bytes', () => {
+    const { path } = withTail('oops');
+    const read = readEvents(path);
+    const prefix = readFileSync(path, 'utf8').slice(0, read.damagedTail?.byteOffset);
+    expect(prefix.endsWith('\n')).toBe(true);
+    expect(prefix.split('\n').filter(Boolean)).toHaveLength(2);
+  });
+});

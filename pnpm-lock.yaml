@@ -45,13 +45,17 @@ importers:
   packages/cli: {}
 
   packages/core:
-    devDependencies:
+    dependencies:
       ajv:
         specifier: ^8.20.0
         version: 8.20.0
       ajv-formats:
         specifier: ^3.0.1
         version: 3.0.1(ajv@8.20.0)
+    devDependencies:
+      '@types/node':
+        specifier: ^20.19.9
+        version: 20.19.43
       yaml:
         specifier: ^2.9.1
         version: 2.9.1
