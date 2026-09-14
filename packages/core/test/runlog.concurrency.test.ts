@@ -7,7 +7,7 @@ import { promisify } from 'node:util';
 
 import { beforeAll, describe, expect, it } from 'vitest';
 
-import { openRunLog, readEvents } from '../src/runlog/index.js';
+import { openRunLog, readEvents, replay } from '../src/runlog/index.js';
 
 /**
  * Separate processes, not separate handles: the check-and-write window is only observable when two
@@ -25,9 +25,14 @@ const child = (dir: string) => `
   for (let i = 0; i < ${EACH}; i++) {
     for (;;) {
       try {
-        openRunLog(${JSON.stringify(dir)}, 'busy').append({
-          type: 'node_started', node: 'implementer', round: 1,
-        });
+        const log = openRunLog(${JSON.stringify(dir)}, 'busy');
+        // The payload is derived from the very handle that will append it, so it is bound to the
+        // sequence that handle holds. Reading the log separately could bind it to another writer's.
+        // The log alternates entry and terminator, so its length says which comes next.
+        const seen = log.existing.length;
+        log.append(seen % 2 === 1
+          ? { type: 'node_started', node: 'implementer', round: (seen + 1) / 2 }
+          : { type: 'node_finished', node: 'implementer', round: seen / 2, outcome: 'done' });
         break;
       } catch (error) {
         // losing a race is fine and expected; anything else is the defect under test
@@ -60,5 +65,7 @@ describe('concurrent writer processes', () => {
     expect(read.events.map((e) => e.seq)).toEqual(
       Array.from({ length: WRITERS * EACH + 1 }, (_, i) => i + 1),
     );
+    // and the interleaved result is a projectable run, not merely a well-numbered file
+    expect(replay(read.events)).toMatchObject({ status: 'running', runId: 'busy' });
   }, 120_000);
 });

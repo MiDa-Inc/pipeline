@@ -41,15 +41,20 @@ const clock = () => {
   let t = Date.parse('2026-09-13T09:00:00Z');
   return () => new Date((t += 1000));
 };
-/** One of every event type, so "every event written" is not a sample of one. */
+/**
+ * One of every event type, and both `resumed` forms, in an order that also replays: a refused
+ * max-round entry, its granted resume, then an ordinary escalation and a resume carrying no grant.
+ */
 const script: EventPayload[] = [
   { type: 'run_started', pipeline: 'feature-loop', task: 'Add rate limiting' },
   { type: 'node_started', node: 'implementer', round: 1 },
   { type: 'handoff_written', node: 'implementer', round: 1, path: 'handoffs/r1-implementer-1.txt' },
   { type: 'node_finished', node: 'implementer', round: 1, outcome: 'done' },
-  { type: 'escalated', node: 'reviewer', round: 1, reason: 'missing_verdict' },
-  { type: 'resumed', node: 'reviewer', round: 1, extra_rounds: 2 },
-  { type: 'resumed', node: 'reviewer', round: 1 },
+  { type: 'escalated', node: 'implementer', round: 2, reason: 'max_rounds' },
+  { type: 'resumed', node: 'implementer', round: 2, extra_rounds: 2 },
+  { type: 'node_started', node: 'implementer', round: 2 },
+  { type: 'escalated', node: 'implementer', round: 2, reason: 'blocked' },
+  { type: 'resumed', node: 'implementer', round: 2 },
   { type: 'run_finished', status: 'done' },
 ];
 
@@ -101,7 +106,7 @@ describe('appending', () => {
   );
 
   it('numbers events from one, strictly increasing with no gaps', () => {
-    expect(written.map((e) => e.seq)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(written.map((e) => e.seq)).toEqual(script.map((_, i) => i + 1));
     expect(written.every((e) => e.run_id === 'run-2')).toBe(true);
   });
 
@@ -200,7 +205,7 @@ describe('events the reader would reject', () => {
       { type: 'handoff_written', node: 'implementer', round: 1, path: '../outside.txt' },
     ],
     ['an unknown outcome', { type: 'node_finished', node: 'a', round: 1, outcome: 'maybe' }],
-  ] as [string, EventPayload][])('refuses to write %s', (_label, bad) => {
+  ] as [string, EventPayload][])('refuses to write %s, which the schema rejects', (_label, bad) => {
     const dir = base();
     const log = openRunLog(dir, 'run-7', { now: clock() });
     log.append(script[0] as EventPayload);
@@ -211,6 +216,77 @@ describe('events the reader would reject', () => {
     // a caller's bad event is not corruption, so the handle stays usable
     log.append(script[1] as EventPayload);
     expect(readEvents(log.paths.events).events.map((e) => e.seq)).toEqual([1, 2]);
+  });
+});
+
+describe('events the history would reject', () => {
+  const opened = (dir: string) => {
+    const log = openRunLog(dir, 'run-14', { now: clock() });
+    log.append(script[0] as EventPayload);
+    log.append(script[1] as EventPayload); // node_started implementer round 1, left open
+    return log;
+  };
+
+  it.each([
+    ['a second entry over an unfinished one', { type: 'node_started', node: 'b', round: 1 }],
+    [
+      'a finish naming a different entry',
+      { type: 'node_finished', node: 'b', round: 1, outcome: 'done' },
+    ],
+    [
+      'a handoff naming a different entry',
+      { type: 'handoff_written', node: 'b', round: 1, path: 'handoffs/r1-b-1.txt' },
+    ],
+    ['a resume with nothing to resume', { type: 'resumed', node: 'implementer', round: 1 }],
+  ] as [string, EventPayload][])(
+    'refuses %s, which the schema accepts but the history does not',
+    (_label, candidate) => {
+      const dir = base();
+      const log = opened(dir);
+      const before = readFileSync(log.paths.events, 'utf8');
+      let thrown: RunLogError | undefined;
+      try {
+        log.append(candidate);
+      } catch (error) {
+        thrown = error as RunLogError;
+      }
+      expect(thrown?.fault).toBe('invalid_event');
+      expect(thrown?.bytes).toBe('unchanged');
+      expect(thrown?.message).toMatch(/unreplayable/);
+      expect(readFileSync(log.paths.events, 'utf8')).toBe(before);
+      expect(log.nextSeq).toBe(3);
+      expect(log.fault).toBeUndefined(); // a bad candidate does not break the handle
+      // and a valid event still lands, taking the seq the refusal did not consume
+      expect(log.append(script[2] as EventPayload).seq).toBe(3);
+    },
+  );
+
+  it('refuses an existing history that cannot be replayed, without touching the file', () => {
+    const dir = base();
+    const log = opened(dir);
+    // a schema-valid but unprojectable line, written past this writer by something else
+    const intruder = {
+      type: 'node_started',
+      node: 'b',
+      round: 1,
+      run_id: 'run-14',
+      seq: 3,
+      ts: '2026-09-13T09:00:09Z',
+    };
+    appendFileSync(log.paths.events, `${JSON.stringify(intruder)}\n`);
+    const before = readFileSync(log.paths.events, 'utf8');
+    const reopened = openRunLog(dir, 'run-14', { now: clock() });
+    let thrown: RunLogError | undefined;
+    try {
+      reopened.append(script[2] as EventPayload);
+    } catch (error) {
+      thrown = error as RunLogError;
+    }
+    expect(thrown?.fault).toBe('corrupt'); // the history, not the candidate
+    expect(thrown?.bytes).toBe('unchanged');
+    expect(thrown?.message).toMatch(/existing log cannot be replayed/);
+    expect(readFileSync(log.paths.events, 'utf8')).toBe(before);
+    expect(reopened.fault?.fault).toBe('corrupt'); // and the handle is finished
   });
 });
 

@@ -14,6 +14,7 @@ import { Ajv2020, type ValidateFunction } from 'ajv/dist/2020.js';
 import * as ajvFormats from 'ajv-formats';
 
 import type { EventPayload, PipelineEvent } from './events.js';
+import { replay } from './state.js';
 
 // See packages/runtime/src/scenario.ts: both packages are CommonJS with ESM-style declarations,
 // and this repository compiles NodeNext with no esModuleInterop.
@@ -420,6 +421,30 @@ export function openRunLog(baseDir: string, runId: string, options: RunLogOption
             'stale_writer',
             `the log is at seq ${found}, but this writer expects ${nextSeq - 1}`,
           );
+
+        // An accepted append must leave the log projectable. Schema validity is not enough: an
+        // event can be well formed and still contradict the history it lands on.
+        try {
+          replay([...observed.events, event]);
+        } catch (cause) {
+          // Two different failures wear the same exception. If the history alone cannot be
+          // projected, the file is already broken and this handle is finished; if only the
+          // candidate breaks it, that is the caller's event and the run is untouched.
+          try {
+            replay(observed.events);
+          } catch {
+            throw stop(
+              'corrupt',
+              `the existing log cannot be replayed: ${(cause as Error).message}`,
+            );
+          }
+          throw new RunLogError(
+            'invalid_event',
+            paths.events,
+            `refusing an event that would make the log unreplayable: ${(cause as Error).message}`,
+            'unchanged',
+          );
+        }
 
         try {
           writeLine(paths.events, `${JSON.stringify(event)}\n`);
