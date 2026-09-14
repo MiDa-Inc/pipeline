@@ -506,11 +506,11 @@ export function openRunLog(baseDir: string, runId: string, options: RunLogOption
   };
 
   /**
-   * Write one event and republish the projection it produces.
+   * Check that `event` may join the history `observed` describes, and return the projection the log
+   * would have once it lands. Writes nothing.
    *
    * **The caller must hold the lock**, and `observed` must come from that same acquisition — see
-   * {@link readUnderLock}. Returning normally means the event is committed; throwing means nothing
-   * was, except that a torn write leaves the handle invalid and the log's tail uncertain.
+   * {@link readUnderLock}.
    */
   const projectCandidate = (event: PipelineEvent, observed: ReadResult): RunState => {
     // An accepted append must leave the log projectable. Schema validity is not enough: an

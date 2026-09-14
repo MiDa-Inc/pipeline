@@ -1,0 +1,24 @@
+# The skeleton engine's configuration: a fixed implementer -> gate -> reviewer loop.
+#
+# Only these three nodes exist, and only these keys are accepted; anything else is refused rather
+# than ignored. Durations accept ms, s, m or h. The working directory is not here — a pipeline
+# describes a pipeline, not the machine it runs on, so the caller supplies it.
+version: 1
+
+# Recorded as the run's pipeline name in events.jsonl.
+name: feature-loop
+
+limits:
+  # How many times the implementer may be entered before the run escalates (SPEC R3).
+  max_rounds: 5
+  # The observation budget for one agent turn (SPEC R4).
+  turn_timeout: 60m
+
+nodes:
+  implementer:
+    profile: claude-code
+  test_gate:
+    run: npm test
+    timeout: 10m
+  reviewer:
+    profile: codex
