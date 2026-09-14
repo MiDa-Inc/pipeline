@@ -95,6 +95,9 @@ export interface ReadResult {
  * that disagrees cannot come from a torn append: the file has been rewritten or damaged some other
  * way, and no part of it is trustworthy.
  */
+/** The event `writeHandoff` records, narrowed so a caller can read the path it chose. */
+export type HandoffEvent = Extract<PipelineEvent, { type: 'handoff_written' }>;
+
 export type RunLogFault =
   /** The last line is torn. The prefix before it is sound. */
   | 'damaged_tail'
@@ -315,7 +318,7 @@ export interface RunLog {
    * Throws {@link HandoffError} for a destination that already exists or a file that could not be
    * written, and {@link RunLogError} for everything that goes wrong once the file is on disk.
    */
-  writeHandoff(node: NodeName, round: Round, contents: string): PipelineEvent;
+  writeHandoff(node: NodeName, round: Round, contents: string): HandoffEvent;
 }
 
 /**
@@ -650,7 +653,7 @@ export function openRunLog(baseDir: string, runId: string, options: RunLogOption
       });
     },
 
-    writeHandoff(node: NodeName, round: Round, contents: string): PipelineEvent {
+    writeHandoff(node: NodeName, round: Round, contents: string): HandoffEvent {
       return locked((observed) => {
         // Allocation reads the handoffs this log has recorded, under the same lock that will
         // record the next one, so two writers cannot be handed the same path.
@@ -683,7 +686,7 @@ export function openRunLog(baseDir: string, runId: string, options: RunLogOption
           throw cause;
         }
         return stamped;
-      });
+      }) as HandoffEvent;
     },
   };
 }

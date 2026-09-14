@@ -45,8 +45,14 @@ const child = (dir: string) => `
 
 describe('concurrent writer processes', () => {
   beforeAll(() => {
-    execFileSync('pnpm', ['exec', 'tsc', '-p', 'tsconfig.json'], { cwd: pkgRoot, stdio: 'pipe' });
-  }, 120_000);
+    // Build this package *and its workspace dependencies*: core's sources reference
+    // @pipeline/runtime, whose declarations only exist once that package is built.
+    const repoRoot = fileURLToPath(new URL('../../..', import.meta.url));
+    execFileSync('pnpm', ['--filter', '@pipeline/core...', 'build'], {
+      cwd: repoRoot,
+      stdio: 'pipe',
+    });
+  }, 180_000);
 
   it('never lets two processes claim the same sequence number', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'pipeline-race-'));

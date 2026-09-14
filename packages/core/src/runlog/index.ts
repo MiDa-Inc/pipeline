@@ -11,6 +11,7 @@ export type {
 } from './events.js';
 export type {
   DamagedTail,
+  HandoffEvent,
   LogBytes,
   ReadResult,
   RunLog,
