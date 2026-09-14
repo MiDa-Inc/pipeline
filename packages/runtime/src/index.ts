@@ -35,4 +35,6 @@ export { createFakeRuntime } from './fake.js';
 export type { ExpectedEvent, LoadOptions, Scenario, ScenarioRuntimeConfig } from './scenario.js';
 export { createScenarioRuntime, discoverScenarios, loadScenario } from './scenario.js';
 
+export * from './herdr/index.js';
+
 export const packageName = '@pipeline/runtime';

@@ -405,6 +405,13 @@ by a minimal `pipeline.skeleton.yaml` (implementer command, reviewer command, ga
 step 02. Unit tests use the step 02 fixtures. Integration tests use real herdr and are skipped
 unless `PIPELINE_HERDR_IT=1`.
 
+**Departure — gates do not run through herdr.** `pane run` reports that keystrokes were delivered,
+not that a command ran, and herdr exposes no exit status for the inner command anywhere
+(`docs/herdr-notes.md`, "Differences from PLAN.md" #2). SPEC R7 routes on a real exit status, so
+`startProcess`/`observeProcess` run gates directly with `child_process.spawn` rather than scraping a
+sentinel out of terminal text. Layout still goes through herdr. Making gate output visible in a pane
+is a later concern, and must not put the exit status back at risk.
+
 **Done when:**
 - Unit tests pass in CI.
 - With `PIPELINE_HERDR_IT=1`, an integration test creates a tab with panes, runs `echo ok`,
