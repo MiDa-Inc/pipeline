@@ -19,3 +19,6 @@ export type {
   RunPaths,
 } from './log.js';
 export { createRunFolder, openRunLog, readEvents, RunLogError, runPaths } from './log.js';
+
+export type { Escalation, HandoffRecord, OpenEntry, RunState, RunStatus } from './state.js';
+export { replay, ReplayError } from './state.js';
