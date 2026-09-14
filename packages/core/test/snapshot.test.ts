@@ -125,7 +125,8 @@ describe('publishing', () => {
 
 describe('reading the cache', () => {
   it('returns nothing when there is no snapshot', () => {
-    expect(readSnapshot(written())).toBeUndefined();
+    // a run folder that exists but has never been appended to, so nothing has published yet
+    expect(readSnapshot(openRunLog(base(), 'run-1', { now: clock() }).paths)).toBeUndefined();
   });
 
   it('returns nothing when the snapshot cannot be parsed', () => {

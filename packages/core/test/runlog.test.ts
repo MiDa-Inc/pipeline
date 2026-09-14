@@ -14,6 +14,7 @@ import Ajv2020 from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
 import { beforeAll, describe, expect, it } from 'vitest';
 
+import { projectLog, readSnapshot } from '../src/runlog/snapshot.js';
 import {
   openRunLog,
   readEvents,
@@ -304,6 +305,123 @@ describe('ownership', () => {
       /now belongs to run other, not run-8/,
     );
     expect(readFileSync(mine.paths.events, 'utf8')).toBe(replacement); // refusal preserves it
+  });
+});
+
+describe('publishing the projection', () => {
+  const run = (dir: string, options: Parameters<typeof openRunLog>[2] = {}) => {
+    const log = openRunLog(dir, 'run-15', { now: clock(), ...options });
+    return log;
+  };
+
+  it('republishes after every append, matching the log it just wrote', () => {
+    const dir = base();
+    const log = run(dir);
+    for (const [i, payload] of script.entries()) {
+      log.append(payload as EventPayload);
+      // the published snapshot is the projection of the authoritative log, at every step
+      expect(readSnapshot(log.paths)).toEqual(projectLog(log.paths));
+      expect((readSnapshot(log.paths) as { lastSeq: number }).lastSeq).toBe(i + 1);
+      expect(log.snapshotFault).toBeUndefined();
+    }
+    expect(readSnapshot(log.paths)).toMatchObject({ status: 'done', runId: 'run-15' });
+  });
+
+  it('publishes while the lock is still held', () => {
+    const dir = base();
+    let heldWhilePublishing: boolean | undefined;
+    const log = run(dir, {
+      snapshot: {
+        write: (path, text) => {
+          heldWhilePublishing = existsSync(`${runPaths(dir, 'run-15').events}.lock`);
+          writeFileSync(path, text, 'utf8');
+        },
+      },
+    });
+    log.append(script[0] as EventPayload);
+    expect(heldWhilePublishing).toBe(true); // read, replay and publish share one lock
+  });
+
+  it('returns the committed event when publication fails, and says so', () => {
+    const dir = base();
+    const log = run(dir, {
+      snapshot: {
+        write: () => {
+          throw new Error('ENOSPC: no space left on device');
+        },
+      },
+    });
+    const event = log.append(script[0] as EventPayload);
+    expect(event.seq).toBe(1); // committed and returned
+    expect(log.nextSeq).toBe(2); // the counter advanced with the bytes
+    expect(readEvents(log.paths.events).events).toHaveLength(1);
+    expect(log.snapshotFault).toMatchObject({ fault: 'snapshot_failed', bytes: 'committed' });
+    expect(log.snapshotFault?.message).toMatch(/seq 1 was committed/);
+    expect(log.fault).toBeUndefined(); // the handle is still usable
+    expect(readSnapshot(log.paths)).toBeUndefined(); // nothing was published
+  });
+
+  it('clears the publication failure once a later append publishes', () => {
+    const dir = base();
+    let failing = true;
+    const log = run(dir, {
+      snapshot: {
+        write: (path, text) => {
+          if (failing) throw new Error('ENOSPC: no space left on device');
+          writeFileSync(path, text, 'utf8');
+        },
+      },
+    });
+    log.append(script[0] as EventPayload);
+    expect(log.snapshotFault).toBeDefined();
+    failing = false;
+    log.append(script[1] as EventPayload);
+    expect(log.snapshotFault).toBeUndefined();
+    expect(readSnapshot(log.paths)).toEqual(projectLog(log.paths));
+  });
+
+  it('keeps both the committed outcome and the stranded lock discoverable', () => {
+    const dir = base();
+    const log = run(dir, {
+      snapshot: {
+        write: () => {
+          throw new Error('ENOSPC: no space left on device');
+        },
+      },
+      lock: {
+        remove: () => {
+          throw new Error('EACCES: permission denied');
+        },
+      },
+    });
+    const event = log.append(script[0] as EventPayload);
+    expect(event.seq).toBe(1); // the committed outcome survives both failures
+    expect(readEvents(log.paths.events).events).toHaveLength(1);
+    expect(log.snapshotFault).toMatchObject({ fault: 'snapshot_failed', bytes: 'committed' });
+    // and the lock nobody released is named, so it can be cleared
+    expect(log.fault).toMatchObject({ fault: 'lock_residue', bytes: 'committed' });
+    expect(log.fault?.message).toContain(`${log.paths.events}.lock`);
+  });
+
+  it.each([
+    [
+      'an event the history refuses',
+      (log: ReturnType<typeof openRunLog>) =>
+        log.append({ type: 'resumed', node: 'b', round: 1 } as EventPayload),
+    ],
+    [
+      'an event the schema rejects',
+      (log: ReturnType<typeof openRunLog>) =>
+        log.append({ type: 'node_started', node: 'b', round: 0 } as EventPayload),
+    ],
+  ])('publishes nothing when %s is rejected', (_label, attempt) => {
+    const dir = base();
+    const log = run(dir);
+    log.append(script[0] as EventPayload);
+    const published = readFileSync(log.paths.state, 'utf8');
+    expect(() => attempt(log)).toThrow(RunLogError);
+    expect(readFileSync(log.paths.state, 'utf8')).toBe(published); // unchanged by a refusal
+    expect(log.snapshotFault).toBeUndefined();
   });
 });
 

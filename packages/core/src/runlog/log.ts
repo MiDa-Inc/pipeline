@@ -14,6 +14,7 @@ import { Ajv2020, type ValidateFunction } from 'ajv/dist/2020.js';
 import * as ajvFormats from 'ajv-formats';
 
 import type { EventPayload, PipelineEvent } from './events.js';
+import { publishSnapshot, type PublishOptions } from './snapshot.js';
 import { replay } from './state.js';
 
 // See packages/runtime/src/scenario.ts: both packages are CommonJS with ESM-style declarations,
@@ -109,7 +110,13 @@ export type RunLogFault =
    * An event was committed, but the lock could not be released afterwards. The append succeeded;
    * what failed is cleanup, and the stale lock now blocks later writers until it is removed.
    */
-  | 'lock_residue';
+  | 'lock_residue'
+  /**
+   * An event was committed, but `state.json` could not be republished from it. The log is intact
+   * and authoritative; only its cache is behind, so the fix is to project again, never to append
+   * the event a second time.
+   */
+  | 'snapshot_failed';
 
 /**
  * What became of the log's bytes when a fault was raised. Three states, not two: a fault can follow
@@ -257,6 +264,8 @@ export interface RunLogOptions {
     readonly stamp?: (fd: number) => void;
     readonly remove?: (path: string) => void;
   };
+  /** Passed through to snapshot publication, so tests can fail it. */
+  readonly snapshot?: PublishOptions;
 }
 
 export interface RunLog {
@@ -266,10 +275,16 @@ export interface RunLog {
   /** The `seq` the next append will use. */
   readonly nextSeq: number;
   /**
-   * A fault this handle has hit, readable without appending again. Set for a cleanup failure that
-   * left the append itself intact, so the caller can learn about a stale lock it must clear.
+   * Why this handle can no longer write, readable without appending again. Set for a cleanup
+   * failure that left the append itself intact, so the caller can learn about a stale lock.
    */
   readonly fault?: RunLogError | undefined;
+  /**
+   * The last publication failure, if the most recent append committed its event but could not
+   * republish `state.json`. Separate from {@link fault} because the handle is still usable and the
+   * log is still authoritative: both can be set at once, and both need to be discoverable.
+   */
+  readonly snapshotFault?: RunLogError | undefined;
   append(payload: EventPayload): PipelineEvent;
 }
 
@@ -364,6 +379,8 @@ export function openRunLog(baseDir: string, runId: string, options: RunLogOption
   let nextSeq = (read.events.at(-1)?.seq ?? 0) + 1;
   /** Set once this handle may no longer write. Recovery is reopening the run, never continuing. */
   let invalid: RunLogError | undefined;
+  /** The last publication failure on a committed event. It does not stop the handle writing again. */
+  let snapshotFault: RunLogError | undefined;
 
   return {
     paths,
@@ -373,6 +390,9 @@ export function openRunLog(baseDir: string, runId: string, options: RunLogOption
     },
     get fault() {
       return invalid;
+    },
+    get snapshotFault() {
+      return snapshotFault;
     },
 
     append(payload: EventPayload): PipelineEvent {
@@ -423,9 +443,11 @@ export function openRunLog(baseDir: string, runId: string, options: RunLogOption
           );
 
         // An accepted append must leave the log projectable. Schema validity is not enough: an
-        // event can be well formed and still contradict the history it lands on.
+        // event can be well formed and still contradict the history it lands on. The projection is
+        // kept: it is exactly what the log will say once this event lands, computed under the lock.
+        let projected;
         try {
-          replay([...observed.events, event]);
+          projected = replay([...observed.events, event]);
         } catch (cause) {
           // Two different failures wear the same exception. If the history alone cannot be
           // projected, the file is already broken and this handle is finished; if only the
@@ -462,6 +484,21 @@ export function openRunLog(baseDir: string, runId: string, options: RunLogOption
         // seq advances the moment the bytes are on disk, before any cleanup can fail.
         nextSeq += 1;
         committed = event;
+
+        // Still holding the lock, so the projection published here is the one for the log as it
+        // now stands. A failure here does not un-commit anything: it is recorded and returned
+        // alongside the event, because appending again would duplicate it.
+        try {
+          publishSnapshot(paths, projected, options.snapshot ?? {});
+          snapshotFault = undefined;
+        } catch (cause) {
+          snapshotFault = new RunLogError(
+            'snapshot_failed',
+            paths.events,
+            `seq ${event.seq} was committed, but its projection could not be published: ${(cause as Error).message}`,
+            'committed',
+          );
+        }
       } catch (cause) {
         outcome = cause;
       }
