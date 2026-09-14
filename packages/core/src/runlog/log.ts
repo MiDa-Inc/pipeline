@@ -444,6 +444,106 @@ export function openRunLog(baseDir: string, runId: string, options: RunLogOption
 
   let nextSeq = (read.events.at(-1)?.seq ?? 0) + 1;
 
+  const stop = (fault: RunLogFault, message: string): RunLogError => {
+    invalid = new RunLogError(fault, paths.events, message, 'unchanged');
+    return invalid;
+  };
+
+  /**
+   * Read the log afresh and repeat the checks every write depends on.
+   *
+   * **The caller must hold the lock.** What comes back describes the log only while that lock is
+   * held: releasing it and reacquiring before using the result would reintroduce exactly the
+   * interleaving the lock exists to prevent, so the read and the write it authorises belong to one
+   * acquisition.
+   */
+  const readUnderLock = (): ReadResult => {
+    // Allocation is serialised against the file, not against this handle's cached counter.
+    let observed;
+    try {
+      observed = readEvents(paths.events);
+    } catch (cause) {
+      throw stop('corrupt', `the log no longer reads cleanly: ${(cause as Error).message}`);
+    }
+    if (observed.damagedTail !== undefined)
+      throw stop('damaged_tail', `the log has a damaged tail: ${observed.damagedTail.detail}`);
+    // Ownership is rechecked every time: the file underneath a handle can be replaced by a
+    // different run's log that happens to sit at the same seq.
+    const owner = observed.events[0]?.run_id;
+    if (owner !== undefined && owner !== runId)
+      throw stop('corrupt', `the log now belongs to run ${owner}, not ${runId}`);
+    const found = observed.events.at(-1)?.seq ?? 0;
+    if (found !== nextSeq - 1)
+      throw stop(
+        'stale_writer',
+        `the log is at seq ${found}, but this writer expects ${nextSeq - 1}`,
+      );
+    return observed;
+  };
+
+  /**
+   * Write one event and republish the projection it produces.
+   *
+   * **The caller must hold the lock**, and `observed` must come from that same acquisition — see
+   * {@link readUnderLock}. Returning normally means the event is committed; throwing means nothing
+   * was, except that a torn write leaves the handle invalid and the log's tail uncertain.
+   */
+  const commitUnderLock = (event: PipelineEvent, observed: ReadResult): void => {
+    // An accepted append must leave the log projectable. Schema validity is not enough: an
+    // event can be well formed and still contradict the history it lands on. The projection is
+    // kept: it is exactly what the log will say once this event lands, computed under the lock.
+    let projected;
+    try {
+      projected = replay([...observed.events, event]);
+    } catch (cause) {
+      // Two different failures wear the same exception. If the history alone cannot be
+      // projected, the file is already broken and this handle is finished; if only the
+      // candidate breaks it, that is the caller's event and the run is untouched.
+      try {
+        replay(observed.events);
+      } catch {
+        throw stop('corrupt', `the existing log cannot be replayed: ${(cause as Error).message}`);
+      }
+      throw new RunLogError(
+        'invalid_event',
+        paths.events,
+        `refusing an event that would make the log unreplayable: ${(cause as Error).message}`,
+        'unchanged',
+      );
+    }
+
+    try {
+      writeLine(paths.events, `${JSON.stringify(event)}\n`);
+    } catch (cause) {
+      // The write may have emitted a prefix. This handle can no longer know where the file
+      // ends, so it never writes again; reopening reports whatever was left behind.
+      invalid = new RunLogError(
+        'writer_invalid',
+        paths.events,
+        `an append failed: ${(cause as Error).message}`,
+        'uncertain',
+      );
+      throw invalid;
+    }
+    // seq advances the moment the bytes are on disk, before any cleanup can fail.
+    nextSeq += 1;
+
+    // Still holding the lock, so the projection published here is the one for the log as it
+    // now stands. A failure here does not un-commit anything: it is recorded and returned
+    // alongside the event, because appending again would duplicate it.
+    try {
+      publishSnapshot(paths, projected, options.snapshot ?? {});
+      snapshotFault = undefined;
+    } catch (cause) {
+      snapshotFault = new RunLogError(
+        'snapshot_failed',
+        paths.events,
+        `seq ${event.seq} was committed, but its projection could not be published: ${(cause as Error).message}`,
+        'committed',
+      );
+    }
+  };
+
   return {
     paths,
     existing: read.events,
@@ -459,10 +559,6 @@ export function openRunLog(baseDir: string, runId: string, options: RunLogOption
 
     append(payload: EventPayload): PipelineEvent {
       if (invalid !== undefined) throw invalid;
-      const stop = (fault: RunLogFault, message: string): RunLogError => {
-        invalid = new RunLogError(fault, paths.events, message, 'unchanged');
-        return invalid;
-      };
 
       // Refuse an event the reader would reject, before anything is locked or written: the writer
       // must never be able to persist a record that makes its own log unreadable. A caller's bad
@@ -483,84 +579,8 @@ export function openRunLog(baseDir: string, runId: string, options: RunLogOption
       let committed: PipelineEvent | undefined;
       let outcome: unknown;
       try {
-        // Allocation is serialised against the file, not against this handle's cached counter.
-        let observed;
-        try {
-          observed = readEvents(paths.events);
-        } catch (cause) {
-          throw stop('corrupt', `the log no longer reads cleanly: ${(cause as Error).message}`);
-        }
-        if (observed.damagedTail !== undefined)
-          throw stop('damaged_tail', `the log has a damaged tail: ${observed.damagedTail.detail}`);
-        // Ownership is rechecked every time: the file underneath a handle can be replaced by a
-        // different run's log that happens to sit at the same seq.
-        const owner = observed.events[0]?.run_id;
-        if (owner !== undefined && owner !== runId)
-          throw stop('corrupt', `the log now belongs to run ${owner}, not ${runId}`);
-        const found = observed.events.at(-1)?.seq ?? 0;
-        if (found !== nextSeq - 1)
-          throw stop(
-            'stale_writer',
-            `the log is at seq ${found}, but this writer expects ${nextSeq - 1}`,
-          );
-
-        // An accepted append must leave the log projectable. Schema validity is not enough: an
-        // event can be well formed and still contradict the history it lands on. The projection is
-        // kept: it is exactly what the log will say once this event lands, computed under the lock.
-        let projected;
-        try {
-          projected = replay([...observed.events, event]);
-        } catch (cause) {
-          // Two different failures wear the same exception. If the history alone cannot be
-          // projected, the file is already broken and this handle is finished; if only the
-          // candidate breaks it, that is the caller's event and the run is untouched.
-          try {
-            replay(observed.events);
-          } catch {
-            throw stop(
-              'corrupt',
-              `the existing log cannot be replayed: ${(cause as Error).message}`,
-            );
-          }
-          throw new RunLogError(
-            'invalid_event',
-            paths.events,
-            `refusing an event that would make the log unreplayable: ${(cause as Error).message}`,
-            'unchanged',
-          );
-        }
-
-        try {
-          writeLine(paths.events, `${JSON.stringify(event)}\n`);
-        } catch (cause) {
-          // The write may have emitted a prefix. This handle can no longer know where the file
-          // ends, so it never writes again; reopening reports whatever was left behind.
-          invalid = new RunLogError(
-            'writer_invalid',
-            paths.events,
-            `an append failed: ${(cause as Error).message}`,
-            'uncertain',
-          );
-          throw invalid;
-        }
-        // seq advances the moment the bytes are on disk, before any cleanup can fail.
-        nextSeq += 1;
+        commitUnderLock(event, readUnderLock());
         committed = event;
-
-        // Still holding the lock, so the projection published here is the one for the log as it
-        // now stands. A failure here does not un-commit anything: it is recorded and returned
-        // alongside the event, because appending again would duplicate it.
-        try {
-          publishSnapshot(paths, projected, options.snapshot ?? {});
-          snapshotFault = undefined;
-        } catch (cause) {
-          snapshotFault = new RunLogError(
-            'snapshot_failed',
-            paths.events,
-            `seq ${event.seq} was committed, but its projection could not be published: ${(cause as Error).message}`,
-            'committed',
-          );
-        }
       } catch (cause) {
         outcome = cause;
       }
