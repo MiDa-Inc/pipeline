@@ -1,9 +1,12 @@
 import type {
   AgentHandle,
+  AgentInspection,
   AgentObservation,
   AgentOutput,
   AgentSubmission,
   DeadlineEpochMs,
+  LaunchResult,
+  LayoutSpec,
   PaneId,
   RuntimeAdapter,
   TurnId,
@@ -46,6 +49,34 @@ export type ScenarioInput =
       readonly extra_rounds?: number;
       readonly guard_resolution?: 'accept' | 'stop';
     };
+
+/**
+ * How a configured pane answers {@link RuntimeAdapter.launchAgent}. Absent means `ready`.
+ *
+ * `startup_unconfirmed` is the orphan case from docs/herdr-notes.md: nothing is registered, so the
+ * pane is later adopted through {@link RuntimeAdapter.inspectAgent} with no name.
+ */
+export type LaunchScript =
+  | { readonly kind: 'ready' }
+  | { readonly kind: 'not_ready'; readonly detail: string }
+  | { readonly kind: 'startup_unconfirmed'; readonly detail: string };
+
+/**
+ * One scripted answer from {@link RuntimeAdapter.inspectAgent}, and equally the state a pane is
+ * left in. Entries are consumed one per call; once a pane's queue runs out, inspection reports the
+ * state the pane was last *observed* in rather than deriving a fresh one.
+ *
+ * `timed_out` is the exception: an inspection that failed to conclude claims nothing about the
+ * pane, so it is reported without disturbing the held state.
+ */
+export type InspectionScript =
+  | { readonly kind: 'ready' }
+  | { readonly kind: 'working' }
+  | { readonly kind: 'not_ready'; readonly detail: string }
+  | { readonly kind: 'state_unknown'; readonly detail: string }
+  | { readonly kind: 'no_agent' }
+  | { readonly kind: 'unknown_pane' }
+  | { readonly kind: 'timed_out' };
 
 export type GuardObservationInput = Extract<ScenarioInput, { kind: 'guard_observation' }>;
 export type OperatorActionInput = Extract<ScenarioInput, { kind: 'operator_action' }>;
@@ -96,6 +127,19 @@ export type CallRecord =
       readonly deadline: DeadlineEpochMs;
     }
   | { readonly call: 'readAgentOutput'; readonly turnId: TurnId }
+  | {
+      /** The whole spec is kept: workspace id, cwd, split target and direction are all targeting. */
+      readonly call: 'createLayout';
+      readonly pane: PaneId;
+      readonly spec: LayoutSpec;
+    }
+  | {
+      readonly call: 'launchAgent';
+      readonly pane: PaneId;
+      readonly profile: string;
+      readonly deadline: DeadlineEpochMs;
+    }
+  | { readonly call: 'inspectAgent'; readonly pane: PaneId; readonly deadline: DeadlineEpochMs }
   | { readonly call: 'shutdown' };
 
 export interface FakeRuntimeConfig {
@@ -107,6 +151,17 @@ export interface FakeRuntimeConfig {
    * from it.
    */
   readonly panes: Readonly<Record<string, string>>;
+  /**
+   * The panes `createLayout` hands out, in call order. Defaults to the keys of `panes`.
+   *
+   * The fake invents no pane ids and never reads node identity from `LayoutSpec.label`: `panes`
+   * stays the single binding authority, and this only says which of those panes is returned when.
+   */
+  readonly layout?: readonly string[];
+  /** How each pane answers `launchAgent`. A pane with no entry launches `ready`. */
+  readonly launches?: Readonly<Record<string, LaunchScript>>;
+  /** Per-pane queues of scripted `inspectAgent` answers. See {@link InspectionScript}. */
+  readonly inspections?: Readonly<Record<string, readonly InspectionScript[]>>;
 }
 
 interface TurnState {
@@ -130,7 +185,13 @@ type Waiter = {
 
 export type FakeAgentRuntime = Pick<
   RuntimeAdapter,
-  'promptAgent' | 'observeAgentTurn' | 'readAgentOutput' | 'shutdown'
+  | 'createLayout'
+  | 'launchAgent'
+  | 'inspectAgent'
+  | 'promptAgent'
+  | 'observeAgentTurn'
+  | 'readAgentOutput'
+  | 'shutdown'
 > &
   ScenarioDriver & {
     /** Every call made against this fake, in order. */
@@ -149,9 +210,45 @@ export function createFakeRuntime(config: FakeRuntimeConfig): FakeAgentRuntime {
   const history: CallRecord[] = [];
   /** Closed by a driver consumption, reopened only by `release()`. See ScenarioDriver.release. */
   let released = true;
+  const layoutPanes = config.layout ?? Object.keys(config.panes);
+  layoutPanes.forEach((pane, index) => {
+    if (config.panes[pane] === undefined)
+      throw new Error(`layout[${index}] pane ${pane} is not bound to a node in panes`);
+    if (layoutPanes.indexOf(pane) !== index)
+      throw new Error(`layout[${index}] repeats pane ${pane}; createLayout hands out each once`);
+  });
+  let layoutCursor = 0;
+  /** Names the runtime assigned. A pane whose start was never confirmed has none, by design. */
+  const names = new Map<string, string>();
+  let nextAgent = 0;
+  const inspections = new Map<string, InspectionScript[]>(
+    Object.entries(config.inspections ?? {}).map(([pane, queue]) => [pane, [...queue]]),
+  );
+  /**
+   * What each pane was last observed to be. A bound pane starts `ready` — that is the premise of
+   * binding it — and nothing else moves it: no inspection infers a transition the fake was never
+   * told about, so `blocked` stays `not_ready` and an unconfirmed start stays unestablished.
+   *
+   * `unestablished` is internal and is never an {@link AgentInspection}. An unconfirmed start
+   * establishes neither recognition nor startup, so it cannot be reported as `state_unknown`,
+   * which per the adapter means a *recognised* agent of undetermined readiness. Until a scripted
+   * inspection says what is actually there, inspecting concludes nothing.
+   */
+  const paneState = new Map<string, InspectionScript | { readonly kind: 'unestablished' }>();
+  const panesOfNode = new Map<string, string[]>();
+  for (const [pane, node] of Object.entries(config.panes))
+    panesOfNode.set(node, [...(panesOfNode.get(node) ?? []), pane]);
+  const observeNode = (node: string, state: InspectionScript): void => {
+    for (const pane of panesOfNode.get(node) ?? []) paneState.set(pane, state);
+  };
 
   const head = (): ScenarioInput | undefined => inputs[cursor];
   const nodeOf = (pane: PaneId): string | undefined => config.panes[pane];
+  /** `name` is omitted, never empty, when no start was confirmed for this pane. */
+  const handleFor = (pane: PaneId): AgentHandle => {
+    const name = names.get(pane);
+    return name === undefined ? { pane } : { pane, name };
+  };
 
   /** Resolve any waiter the current head now satisfies. Consumes at most one input per pass. */
   /**
@@ -176,16 +273,29 @@ export function createFakeRuntime(config: FakeRuntimeConfig): FakeAgentRuntime {
       const turn = turns.get(active);
       let observation: AgentObservation;
       if (next.kind === 'deadline_expiry') {
+        // The turn's deadline passed, so readiness is undetermined — not a settled pane, and not
+        // an inspection timeout, which is about the inspection rather than the agent.
+        observeNode(next.node, { kind: 'state_unknown', detail: 'the turn deadline passed' });
         observation = { kind: 'timed_out', turnId: active };
       } else if (next.result === 'settled') {
         if (turn) turn.settledText = next.text;
         activeTurn.delete(next.node);
+        observeNode(next.node, { kind: 'ready' });
         observation = { kind: 'settled', turnId: active, text: next.text };
       } else {
+        const detail = `scripted ${next.result} for ${next.node}`;
+        // A blocked turn is an agent waiting at a dialog; an unconfirmed one is uncertainty.
+        // Neither is an agent quietly working, and neither resolves itself.
+        observeNode(
+          next.node,
+          next.result === 'blocked'
+            ? { kind: 'not_ready', detail }
+            : { kind: 'state_unknown', detail },
+        );
         observation = {
           kind: next.result === 'blocked' ? 'blocked' : 'unconfirmed',
           turnId: active,
-          detail: `scripted ${next.result} for ${next.node}`,
+          detail,
         };
       }
       for (const w of matched) w.settle(observation);
@@ -215,6 +325,87 @@ export function createFakeRuntime(config: FakeRuntimeConfig): FakeAgentRuntime {
     release: () => {
       released = true;
       pump();
+    },
+
+    /**
+     * Hand out the next configured pane. Creates nothing and consumes no scenario input: layout is
+     * configuration, not script, so the ordered cursor is untouched.
+     */
+    createLayout(spec: LayoutSpec) {
+      if (closed) return Promise.reject(new Error('createLayout after shutdown'));
+      const target = spec.destination;
+      if (target.kind === 'split' && nodeOf(target.pane) === undefined)
+        return Promise.reject(new Error(`cannot split unknown pane ${target.pane}`));
+      const pane = layoutPanes[layoutCursor] as PaneId | undefined;
+      if (pane === undefined)
+        return Promise.reject(
+          new Error(`no pane configured for createLayout call ${layoutCursor + 1}`),
+        );
+      layoutCursor += 1;
+      // Snapshot, nested destination included: a caller that reuses and mutates one spec object
+      // must not rewrite the record of the calls it already made.
+      history.push({ call: 'createLayout', pane, spec: { ...spec, destination: { ...target } } });
+      return Promise.resolve(pane);
+    },
+
+    launchAgent(pane: PaneId, profile: string, deadline: DeadlineEpochMs) {
+      history.push({ call: 'launchAgent', pane, profile, deadline });
+      const unconfirmed = (detail: string): Promise<LaunchResult> => {
+        // Whether anything launched is unknown, and inspecting does not make it known.
+        paneState.set(pane, { kind: 'unestablished' });
+        return Promise.resolve({ kind: 'startup_unconfirmed', pane, detail });
+      };
+      if (closed) return unconfirmed('the runtime was shut down before readiness was established');
+      if (nodeOf(pane) === undefined) return unconfirmed(`pane ${pane} is not bound to a node`);
+      const scripted = config.launches?.[pane] ?? { kind: 'ready' as const };
+      if (scripted.kind === 'startup_unconfirmed') return unconfirmed(scripted.detail);
+      // Only a confirmed start registers a name; an unconfirmed one leaves the agent adoptable
+      // by pane alone, which is why AgentHandle.name is optional.
+      if (!names.has(pane)) names.set(pane, `agent-${++nextAgent}`);
+      const agent = handleFor(pane);
+      if (scripted.kind === 'not_ready') {
+        // The dialog stays until something explicitly clears it; inspecting is not that something.
+        paneState.set(pane, { kind: 'not_ready', detail: scripted.detail });
+        return Promise.resolve<LaunchResult>({ kind: 'not_ready', agent, detail: scripted.detail });
+      }
+      paneState.set(pane, { kind: 'ready' });
+      return Promise.resolve<LaunchResult>({ kind: 'ready', agent });
+    },
+
+    /**
+     * Report what a pane holds. Launches nothing, consumes no scenario input, and invents no
+     * transition: it reports the state the pane was last observed in, or the next scripted answer.
+     */
+    inspectAgent(pane: PaneId, deadline: DeadlineEpochMs, signal?: AbortSignal) {
+      history.push({ call: 'inspectAgent', pane, deadline });
+      if (closed || signal?.aborted)
+        return Promise.resolve<AgentInspection>({ kind: 'cancelled', pane });
+      const node = nodeOf(pane);
+      if (node === undefined)
+        return Promise.resolve<AgentInspection>({ kind: 'unknown_pane', pane });
+      const scripted = inspections.get(pane)?.shift();
+      // A scripted answer is itself an explicit transition, except an inspection timeout, which
+      // concludes nothing and so leaves the pane where it was.
+      if (scripted !== undefined && scripted.kind !== 'timed_out') paneState.set(pane, scripted);
+      const state = scripted ?? paneState.get(pane) ?? { kind: 'ready' as const };
+      switch (state.kind) {
+        case 'not_ready':
+        case 'state_unknown':
+          return Promise.resolve<AgentInspection>({
+            kind: state.kind,
+            agent: handleFor(pane),
+            detail: state.detail,
+          });
+        case 'ready':
+        case 'working':
+          return Promise.resolve<AgentInspection>({ kind: state.kind, agent: handleFor(pane) });
+        case 'unestablished':
+          // Nothing is known and nothing is claimed: the inspection simply did not conclude.
+          // A scripted entry is what establishes ready, state_unknown or no_agent from here.
+          return Promise.resolve<AgentInspection>({ kind: 'timed_out', pane });
+        default:
+          return Promise.resolve<AgentInspection>({ kind: state.kind, pane });
+      }
     },
 
     promptAgent(
@@ -249,6 +440,7 @@ export function createFakeRuntime(config: FakeRuntimeConfig): FakeAgentRuntime {
                 detail: `node ${node} has an unsettled turn; overlapping submissions are unsupported`,
               }
             : { kind: 'accepted' as const };
+      if (outcome.kind === 'accepted' && node !== undefined) observeNode(node, { kind: 'working' });
       const submission: AgentSubmission = { turnId, submitted: Promise.resolve(outcome) };
       return submission;
     },

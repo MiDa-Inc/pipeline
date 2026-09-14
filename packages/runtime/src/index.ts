@@ -24,6 +24,8 @@ export type {
   FakeAgentRuntime,
   FakeRuntimeConfig,
   GuardObservationInput,
+  InspectionScript,
+  LaunchScript,
   OperatorActionInput,
   ScenarioDriver,
   ScenarioInput,
