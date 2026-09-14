@@ -14,9 +14,10 @@ import { fileURLToPath } from 'node:url';
 import { Ajv2020, type ValidateFunction } from 'ajv/dist/2020.js';
 import * as ajvFormats from 'ajv-formats';
 
-import type { EventPayload, PipelineEvent } from './events.js';
+import type { EventPayload, NodeName, PipelineEvent, Round } from './events.js';
+import { nextHandoffPath, writeHandoffFile, type WriteHandoffOptions } from './handoff.js';
 import { publishSnapshot, type PublishOptions } from './snapshot.js';
-import { replay } from './state.js';
+import { replay, type RunState } from './state.js';
 
 // See packages/runtime/src/scenario.ts: both packages are CommonJS with ESM-style declarations,
 // and this repository compiles NodeNext with no esModuleInterop.
@@ -144,6 +145,12 @@ const BYTES_NOTE: Record<LogBytes, string> = {
 
 export class RunLogError extends Error {
   readonly damagedTail?: DamagedTail;
+  /**
+   * A handoff file that was written but never recorded, because the append that would have
+   * recorded it failed. The file is deliberately left in place; it is evidence, and the next
+   * handoff for that node and round refuses rather than writing over it.
+   */
+  handoff?: string;
   constructor(
     readonly fault: RunLogFault,
     readonly path: string,
@@ -272,6 +279,8 @@ export interface RunLogOptions {
   };
   /** Passed through to snapshot publication, so tests can fail it. */
   readonly snapshot?: PublishOptions;
+  /** Passed through to handoff file writing, so tests can fail it. */
+  readonly handoff?: WriteHandoffOptions;
 }
 
 export interface RunLog {
@@ -292,6 +301,21 @@ export interface RunLog {
    */
   readonly snapshotFault?: RunLogError | undefined;
   append(payload: EventPayload): PipelineEvent;
+  /**
+   * Write a handoff for `node` in `round`, then record it.
+   *
+   * The path is `handoffs/r<round>-<node>-<n>.txt`, with `n` counting the handoffs already recorded
+   * for that node and round. Allocation, the file write, the event and the republished snapshot all
+   * happen under one lock, so no other writer can take the same path or the same `seq` in between.
+   *
+   * The file is written **before** the event, because an event must never name a file that is not
+   * there. The reverse is possible and is reported rather than hidden: if the append then fails,
+   * the file stays and the error carries its path in {@link RunLogError.handoff}.
+   *
+   * Throws {@link HandoffError} for a destination that already exists or a file that could not be
+   * written, and {@link RunLogError} for everything that goes wrong once the file is on disk.
+   */
+  writeHandoff(node: NodeName, round: Round, contents: string): PipelineEvent;
 }
 
 /**
@@ -488,7 +512,7 @@ export function openRunLog(baseDir: string, runId: string, options: RunLogOption
    * {@link readUnderLock}. Returning normally means the event is committed; throwing means nothing
    * was, except that a torn write leaves the handle invalid and the log's tail uncertain.
    */
-  const commitUnderLock = (event: PipelineEvent, observed: ReadResult): void => {
+  const projectCandidate = (event: PipelineEvent, observed: ReadResult): RunState => {
     // An accepted append must leave the log projectable. Schema validity is not enough: an
     // event can be well formed and still contradict the history it lands on. The projection is
     // kept: it is exactly what the log will say once this event lands, computed under the lock.
@@ -511,7 +535,14 @@ export function openRunLog(baseDir: string, runId: string, options: RunLogOption
         'unchanged',
       );
     }
+    return projected;
+  };
 
+  /**
+   * Write one validated event and republish the projection it produces. **The caller must hold the
+   * lock**, and `projected` must come from {@link projectCandidate} for this same event and read.
+   */
+  const writeAndPublish = (event: PipelineEvent, projected: RunState): void => {
     try {
       writeLine(paths.events, `${JSON.stringify(event)}\n`);
     } catch (cause) {
@@ -544,6 +575,55 @@ export function openRunLog(baseDir: string, runId: string, options: RunLogOption
     }
   };
 
+  const commitUnderLock = (event: PipelineEvent, observed: ReadResult): void =>
+    writeAndPublish(event, projectCandidate(event, observed));
+
+  const validateCandidate = (event: PipelineEvent): void => {
+    const validate = eventValidator();
+    if (!validate(event))
+      throw new RunLogError(
+        'invalid_event',
+        paths.events,
+        `refusing to append an invalid event: ${describe(validate)}`,
+        'unchanged',
+      );
+  };
+
+  /**
+   * Run one writing operation with the lock held from the authoritative read through publication,
+   * then release it without ever replacing what the operation concluded.
+   *
+   * A lock that could not be released is reported as a fault on the handle, describing the log's
+   * bytes as `committed` when an event landed and `unchanged` when none did.
+   */
+  const locked = (body: (observed: ReadResult) => PipelineEvent): PipelineEvent => {
+    if (invalid !== undefined) throw invalid;
+    const release = acquire();
+    let committed: PipelineEvent | undefined;
+    let outcome: unknown;
+    try {
+      committed = body(readUnderLock());
+    } catch (cause) {
+      outcome = cause;
+    }
+    // Cleanup runs after the outcome is settled and can never replace it: a failed release of a
+    // committed event is not a rejected write, and must not be reported as one.
+    const stuck = release();
+    // The lock is still on disk, so this handle cannot write again either way. `??=` keeps a
+    // more serious fault, such as a torn write, as the reason the handle is finished.
+    if (stuck !== undefined)
+      invalid ??= new RunLogError(
+        'lock_residue',
+        paths.events,
+        committed === undefined
+          ? `${lockPath} could not be released: ${stuck}`
+          : `seq ${committed.seq} was committed, but ${lockPath} could not be released: ${stuck}`,
+        committed === undefined ? 'unchanged' : 'committed',
+      );
+    if (outcome !== undefined) throw outcome;
+    return committed as PipelineEvent;
+  };
+
   return {
     paths,
     existing: read.events,
@@ -559,48 +639,51 @@ export function openRunLog(baseDir: string, runId: string, options: RunLogOption
 
     append(payload: EventPayload): PipelineEvent {
       if (invalid !== undefined) throw invalid;
-
-      // Refuse an event the reader would reject, before anything is locked or written: the writer
+      // Refuse an event the reader would reject before anything is locked or written: the writer
       // must never be able to persist a record that makes its own log unreadable. A caller's bad
       // event is not corruption, so the handle stays usable and `nextSeq` does not move.
       const event = { ...payload, run_id: runId, seq: nextSeq, ts: now().toISOString() };
-      const validate = eventValidator();
-      if (!validate(event))
-        throw new RunLogError(
-          'invalid_event',
-          paths.events,
-          `refusing to append an invalid event: ${describe(validate)}`,
-          'unchanged',
-        );
+      validateCandidate(event);
+      return locked((observed) => {
+        commitUnderLock(event, observed);
+        return event;
+      });
+    },
 
-      // Revalidation and the write happen under an exclusive lock. Checking and then writing as
-      // two steps is what let two processes interleave and both claim the same seq.
-      const release = acquire();
-      let committed: PipelineEvent | undefined;
-      let outcome: unknown;
-      try {
-        commitUnderLock(event, readUnderLock());
-        committed = event;
-      } catch (cause) {
-        outcome = cause;
-      }
-
-      // Cleanup runs after the outcome is settled and can never replace it: a failed release of a
-      // committed event is not a rejected append, and must not be reported as one.
-      const stuck = release();
-      // The lock is still on disk, so this handle cannot write again either way. `??=` keeps a
-      // more serious fault, such as a torn write, as the reason the handle is finished.
-      if (stuck !== undefined)
-        invalid ??= new RunLogError(
-          'lock_residue',
-          paths.events,
-          committed === undefined
-            ? `${lockPath} could not be released: ${stuck}`
-            : `seq ${committed.seq} was committed, but ${lockPath} could not be released: ${stuck}`,
-          committed === undefined ? 'unchanged' : 'committed',
-        );
-      if (outcome !== undefined) throw outcome;
-      return event;
+    writeHandoff(node: NodeName, round: Round, contents: string): PipelineEvent {
+      return locked((observed) => {
+        // Allocation reads the handoffs this log has recorded, under the same lock that will
+        // record the next one, so two writers cannot be handed the same path.
+        const recorded = observed.events
+          .filter((e) => e.type === 'handoff_written')
+          .map((e) => ({ node: e.node, round: e.round, path: e.path }));
+        const path = nextHandoffPath(recorded, node, round);
+        // Everything that can refuse this handoff happens before the file exists — the timestamp,
+        // the schema and the history it would land on — so a refusal leaves nothing behind. Only
+        // the file write itself, and the event write after it, can orphan anything.
+        const stamped = {
+          type: 'handoff_written' as const,
+          node,
+          round,
+          path,
+          run_id: runId,
+          seq: nextSeq,
+          ts: now().toISOString(),
+        };
+        validateCandidate(stamped);
+        const projected = projectCandidate(stamped, observed);
+        writeHandoffFile(paths, path, contents, options.handoff ?? {});
+        try {
+          writeAndPublish(stamped, projected);
+        } catch (cause) {
+          // The file is on disk and nothing records it. The append's own fault and byte state are
+          // what the caller needs — a torn line still leaves the log uncertain — so they are kept
+          // and the orphan is named alongside them rather than replacing them.
+          if (cause instanceof RunLogError) cause.handoff = path;
+          throw cause;
+        }
+        return stamped;
+      });
     },
   };
 }

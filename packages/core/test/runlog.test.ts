@@ -4,6 +4,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   writeFileSync,
   writeSync,
@@ -16,6 +17,7 @@ import Ajv2020 from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
 import { beforeAll, describe, expect, it } from 'vitest';
 
+import { HandoffError } from '../src/runlog/handoff.js';
 import { projectLog, readSnapshot } from '../src/runlog/snapshot.js';
 import {
   openRunLog,
@@ -445,6 +447,203 @@ describe('publishing the projection', () => {
     expect(() => attempt(log)).toThrow(RunLogError);
     expect(readFileSync(log.paths.state, 'utf8')).toBe(published); // unchanged by a refusal
     expect(log.snapshotFault).toBeUndefined();
+  });
+});
+
+describe('recording handoffs', () => {
+  const started = (dir: string, options: Parameters<typeof openRunLog>[2] = {}) => {
+    const log = openRunLog(dir, 'run-18', { now: clock(), ...options });
+    log.append(script[0] as EventPayload); // run_started
+    log.append(script[1] as EventPayload); // node_started implementer round 1
+    return log;
+  };
+  const file = (log: ReturnType<typeof openRunLog>, path: string) =>
+    join(realpathSync(log.paths.handoffs), path.replace('handoffs/', ''));
+
+  it('writes the file and records it with the producing node and round', () => {
+    const log = started(base());
+    const event = log.writeHandoff('implementer', 1, 'the handoff body\n');
+    expect(event).toMatchObject({
+      type: 'handoff_written',
+      node: 'implementer',
+      round: 1,
+      path: 'handoffs/r1-implementer-1.txt',
+      seq: 3,
+    });
+    expect(readFileSync(file(log, event.path), 'utf8')).toBe('the handoff body\n');
+    expect(readEvents(log.paths.events).events.at(-1)).toEqual(event);
+    // and the republished snapshot carries it, in order
+    expect(readSnapshot(log.paths)).toMatchObject({
+      handoffs: [{ node: 'implementer', round: 1, path: 'handoffs/r1-implementer-1.txt' }],
+    });
+    expect(log.snapshotFault).toBeUndefined();
+  });
+
+  it('numbers by node and round, and keeps numbering across a reopen', () => {
+    const dir = base();
+    const log = started(dir);
+    expect(log.writeHandoff('implementer', 1, 'a').path).toBe('handoffs/r1-implementer-1.txt');
+    expect(log.writeHandoff('implementer', 1, 'b').path).toBe('handoffs/r1-implementer-2.txt');
+    log.append({ type: 'node_finished', node: 'implementer', round: 1, outcome: 'done' });
+    log.append({ type: 'node_started', node: 'reviewer', round: 2 });
+    expect(log.writeHandoff('reviewer', 2, 'c').path).toBe('handoffs/r2-reviewer-1.txt');
+    // a new handle derives the count from the log, not from anything it remembers
+    const reopened = openRunLog(dir, 'run-18', { now: clock() });
+    expect(reopened.writeHandoff('reviewer', 2, 'd').path).toBe('handoffs/r2-reviewer-2.txt');
+    expect(
+      readEvents(reopened.paths.events).events.filter((e) => e.type === 'handoff_written'),
+    ).toHaveLength(4);
+  });
+
+  it('refuses an orphaned destination rather than writing over it', () => {
+    const log = started(base());
+    const orphan = file(log, 'handoffs/r1-implementer-1.txt');
+    writeFileSync(orphan, 'left by an earlier attempt', 'utf8');
+    expect(() => log.writeHandoff('implementer', 1, 'new')).toThrow(HandoffError);
+    expect(readFileSync(orphan, 'utf8')).toBe('left by an earlier attempt');
+    expect(readEvents(log.paths.events).events).toHaveLength(2); // nothing recorded
+    expect(log.fault).toBeUndefined(); // and the handle survives a caller-level refusal
+  });
+
+  it.each([
+    ['clears its partial file', {}, false],
+    [
+      'reports residue when clearing fails',
+      {
+        remove: () => {
+          throw new Error('EACCES: permission denied');
+        },
+      },
+      true,
+    ],
+  ])('records nothing when the file cannot be written, and %s', (_label, extra, residue) => {
+    const log = started(base(), {
+      handoff: {
+        write: () => {
+          throw new Error('ENOSPC: no space left on device');
+        },
+        ...extra,
+      },
+    });
+    let thrown: HandoffError | undefined;
+    try {
+      log.writeHandoff('implementer', 1, 'x');
+    } catch (error) {
+      thrown = error as HandoffError;
+    }
+    expect(thrown?.fault).toBe('write_failed');
+    expect(thrown?.residue).toBe(residue ? file(log, 'handoffs/r1-implementer-1.txt') : undefined);
+    expect(existsSync(file(log, 'handoffs/r1-implementer-1.txt'))).toBe(residue);
+    expect(readEvents(log.paths.events).events).toHaveLength(2); // no event, log unchanged
+    expect(log.nextSeq).toBe(3);
+  });
+
+  it('creates no file when the handoff is refused before anything is written', () => {
+    const dir = base();
+    const log = started(dir);
+    // a handoff for an entry that is not open: refused by the history, and nothing is left behind
+    let thrown: RunLogError | undefined;
+    try {
+      log.writeHandoff('reviewer', 4, 'never written');
+    } catch (error) {
+      thrown = error as RunLogError;
+    }
+    expect(thrown?.fault).toBe('invalid_event');
+    expect(thrown?.bytes).toBe('unchanged');
+    expect(thrown?.handoff).toBeUndefined(); // there is no orphan to name
+    expect(existsSync(file(log, 'handoffs/r4-reviewer-1.txt'))).toBe(false);
+    expect(readEvents(log.paths.events).events).toHaveLength(2);
+    // and the refusal costs the node nothing: once the entry is legitimately open, it works
+    log.append({ type: 'node_finished', node: 'implementer', round: 1, outcome: 'done' });
+    log.append({ type: 'node_started', node: 'reviewer', round: 4 });
+    expect(log.writeHandoff('reviewer', 4, 'now valid').path).toBe('handoffs/r4-reviewer-1.txt');
+  });
+
+  it('keeps the file and names it when the event write fails outright', () => {
+    const dir = base();
+    let appends = 0;
+    const log = started(dir, {
+      // the two setup appends land; the handoff's own event write fails before emitting anything
+      writeLine: (path, line) => {
+        appends += 1;
+        if (appends <= 2) return void appendFileSync(path, line);
+        throw new Error('EIO: input/output error');
+      },
+    });
+    let thrown: RunLogError | undefined;
+    try {
+      log.writeHandoff('implementer', 1, 'body');
+    } catch (error) {
+      thrown = error as RunLogError;
+    }
+    // the writer cannot know how far a failed write got, so it never claims the log is unchanged
+    expect(thrown?.fault).toBe('writer_invalid');
+    expect(thrown?.bytes).toBe('uncertain');
+    expect(thrown?.handoff).toBe('handoffs/r1-implementer-1.txt');
+    expect(readFileSync(file(log, 'handoffs/r1-implementer-1.txt'), 'utf8')).toBe('body');
+    expect(log.nextSeq).toBe(3); // no seq was consumed
+    expect(log.fault?.fault).toBe('writer_invalid'); // and the handle is finished
+    // reopening finds the orphan and refuses to write over it
+    const reopened = openRunLog(dir, 'run-18', { now: clock() });
+    expect(() => reopened.writeHandoff('implementer', 1, 'again')).toThrow(HandoffError);
+    expect(readFileSync(file(log, 'handoffs/r1-implementer-1.txt'), 'utf8')).toBe('body');
+  });
+
+  it('keeps the file and names it when the append tears a partial line', () => {
+    let appends = 0;
+    const log = started(base(), {
+      // the two setup appends land normally; only the handoff's own append tears
+      writeLine: (path, line) => {
+        appends += 1;
+        if (appends <= 2) return void appendFileSync(path, line);
+        appendFileSync(path, line.slice(0, 12));
+        throw new Error('torn write');
+      },
+    });
+    let thrown: RunLogError | undefined;
+    try {
+      log.writeHandoff('implementer', 1, 'body');
+    } catch (error) {
+      thrown = error as RunLogError;
+    }
+    expect(thrown?.fault).toBe('writer_invalid');
+    expect(thrown?.bytes).toBe('uncertain'); // the log's tail is torn, not unchanged
+    expect(thrown?.handoff).toBe('handoffs/r1-implementer-1.txt');
+    expect(readFileSync(file(log, 'handoffs/r1-implementer-1.txt'), 'utf8')).toBe('body');
+    expect(readEvents(log.paths.events).damagedTail).toBeDefined();
+  });
+
+  it('returns the committed handoff when its projection cannot be published', () => {
+    const dir = base();
+    let failing = false;
+    const log = started(dir, {
+      snapshot: {
+        write: (path, text) => {
+          if (failing) throw new Error('ENOSPC: no space left on device');
+          writeFileSync(path, text, 'utf8');
+        },
+      },
+    });
+    failing = true;
+    const event = log.writeHandoff('implementer', 1, 'body');
+    expect(event.seq).toBe(3); // committed and returned
+    expect(readEvents(log.paths.events).events).toHaveLength(3);
+    expect(log.snapshotFault).toMatchObject({ fault: 'snapshot_failed', bytes: 'committed' });
+  });
+
+  it('holds the lock from allocation through the file write', () => {
+    const dir = base();
+    let heldWhileWriting: boolean | undefined;
+    const log = started(dir, {
+      handoff: {
+        write: (fd, buffer, offset) => {
+          heldWhileWriting = existsSync(`${runPaths(dir, 'run-18').events}.lock`);
+          return writeSync(fd, buffer, offset);
+        },
+      },
+    });
+    log.writeHandoff('implementer', 1, 'body');
+    expect(heldWhileWriting).toBe(true);
   });
 });
 

@@ -298,7 +298,9 @@ describe('writing the file', () => {
 describe('the module stays internal', () => {
   it('is not exported from the package', async () => {
     const runlog = (await import('../src/runlog/index.js')) as Record<string, unknown>;
-    for (const name of ['nextHandoffPath', 'writeHandoffFile', 'HandoffError'])
+    for (const name of ['nextHandoffPath', 'writeHandoffFile'])
       expect(runlog[name]).toBeUndefined();
+    // the error is reachable from RunLog.writeHandoff, so callers need it
+    expect(runlog['HandoffError']).toBeDefined();
   });
 });
