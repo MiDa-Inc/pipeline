@@ -19,4 +19,15 @@ export type {
   TurnId,
 } from './adapter.js';
 
+export type {
+  CallRecord,
+  FakeAgentRuntime,
+  FakeRuntimeConfig,
+  GuardObservationInput,
+  OperatorActionInput,
+  ScenarioDriver,
+  ScenarioInput,
+} from './fake.js';
+export { createFakeRuntime } from './fake.js';
+
 export const packageName = '@pipeline/runtime';
