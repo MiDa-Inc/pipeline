@@ -5,10 +5,15 @@ import type {
   AgentOutput,
   AgentSubmission,
   DeadlineEpochMs,
+  ExecutionId,
   LaunchResult,
   LayoutSpec,
   PaneId,
+  ProcessLaunch,
+  ProcessObservation,
+  ProcessSpec,
   RuntimeAdapter,
+  SubmissionOutcome,
   TurnId,
 } from './adapter.js';
 
@@ -140,6 +145,19 @@ export type CallRecord =
       readonly deadline: DeadlineEpochMs;
     }
   | { readonly call: 'inspectAgent'; readonly pane: PaneId; readonly deadline: DeadlineEpochMs }
+  | {
+      readonly call: 'startProcess';
+      readonly executionId: ExecutionId;
+      readonly node: string;
+      readonly command: string;
+      readonly cwd: string;
+      readonly deadline: DeadlineEpochMs;
+    }
+  | {
+      readonly call: 'observeProcess';
+      readonly executionId: ExecutionId;
+      readonly deadline: DeadlineEpochMs;
+    }
   | { readonly call: 'shutdown' };
 
 export interface FakeRuntimeConfig {
@@ -183,16 +201,22 @@ type Waiter = {
   readonly settle: (o: AgentObservation) => void;
 };
 
-export type FakeAgentRuntime = Pick<
-  RuntimeAdapter,
-  | 'createLayout'
-  | 'launchAgent'
-  | 'inspectAgent'
-  | 'promptAgent'
-  | 'observeAgentTurn'
-  | 'readAgentOutput'
-  | 'shutdown'
-> &
+/** One gate execution. `node` is the identity: command and cwd may repeat across gate nodes. */
+interface ExecutionState {
+  readonly executionId: ExecutionId;
+  readonly node: string;
+  /** Cancelled before dispatch: never ran, never occupies its node. See {@link TurnState}. */
+  readonly undispatched?: boolean;
+  result?: { readonly exitStatus: number; readonly output: string };
+}
+
+type ProcessWaiter = {
+  readonly executionId: ExecutionId;
+  readonly settle: (o: ProcessObservation) => void;
+};
+
+/** The complete adapter surface, so conformance is a compile-time fact rather than a claim. */
+export type FakeAgentRuntime = RuntimeAdapter &
   ScenarioDriver & {
     /** Every call made against this fake, in order. */
     readonly history: readonly CallRecord[];
@@ -207,6 +231,11 @@ export function createFakeRuntime(config: FakeRuntimeConfig): FakeAgentRuntime {
   /** The one turn each node is currently running. Only its observers may consume that node's results. */
   const activeTurn = new Map<string, TurnId>();
   const waiters: Waiter[] = [];
+  const executions = new Map<string, ExecutionState>();
+  /** The one execution each gate node is currently running, on the same terms as `activeTurn`. */
+  const activeExecution = new Map<string, ExecutionId>();
+  const processWaiters: ProcessWaiter[] = [];
+  let nextExecution = 0;
   const history: CallRecord[] = [];
   /** Closed by a driver consumption, reopened only by `release()`. See ScenarioDriver.release. */
   let released = true;
@@ -258,47 +287,101 @@ export function createFakeRuntime(config: FakeRuntimeConfig): FakeAgentRuntime {
    * earlier turn's scripted answer. Every observer of the active turn settles from the *same*
    * consumed input, so two observers of one turn never draw two results.
    */
+  /**
+   * What a node currently has in flight, across both kinds of work.
+   *
+   * A node runs one operation at a time, and never one of each: `deadline_expiry` carries only a
+   * node, so an overlapping turn and gate execution would make it ambiguous which of them a
+   * scripted timeout belongs to. Refusing the second keeps that routing well defined.
+   */
+  const occupiedBy = (node: string): 'turn' | 'gate execution' | undefined =>
+    activeTurn.has(node) ? 'turn' : activeExecution.has(node) ? 'gate execution' : undefined;
+
+  const releaseTurn = (
+    next: Extract<ScenarioInput, { kind: 'agent_result' | 'deadline_expiry' }>,
+  ): boolean => {
+    const active = activeTurn.get(next.node);
+    if (active === undefined) return false;
+    const matched = waiters.filter((w) => w.turnId === active);
+    if (matched.length === 0) return false;
+    for (const w of matched) waiters.splice(waiters.indexOf(w), 1);
+    cursor += 1;
+    const turn = turns.get(active);
+    let observation: AgentObservation;
+    if (next.kind === 'deadline_expiry') {
+      // The turn's deadline passed, so readiness is undetermined — not a settled pane, and not
+      // an inspection timeout, which is about the inspection rather than the agent.
+      observeNode(next.node, { kind: 'state_unknown', detail: 'the turn deadline passed' });
+      observation = { kind: 'timed_out', turnId: active };
+    } else if (next.result === 'settled') {
+      if (turn) turn.settledText = next.text;
+      activeTurn.delete(next.node);
+      observeNode(next.node, { kind: 'ready' });
+      observation = { kind: 'settled', turnId: active, text: next.text };
+    } else {
+      const detail = `scripted ${next.result} for ${next.node}`;
+      // A blocked turn is an agent waiting at a dialog; an unconfirmed one is uncertainty.
+      // Neither is an agent quietly working, and neither resolves itself.
+      observeNode(
+        next.node,
+        next.result === 'blocked'
+          ? { kind: 'not_ready', detail }
+          : { kind: 'state_unknown', detail },
+      );
+      observation = {
+        kind: next.result === 'blocked' ? 'blocked' : 'unconfirmed',
+        turnId: active,
+        detail,
+      };
+    }
+    for (const w of matched) w.settle(observation);
+    return true;
+  };
+
+  /**
+   * Release a gate result to the observers of the node's **active** execution, on exactly the terms
+   * `releaseTurn` uses: bound by execution rather than by node, so a later execution on the same
+   * gate node cannot take an earlier one's result, and every observer of one execution settles from
+   * the same consumed input.
+   */
+  const releaseGate = (
+    next: Extract<ScenarioInput, { kind: 'gate_result' | 'deadline_expiry' }>,
+  ): boolean => {
+    const active = activeExecution.get(next.node);
+    if (active === undefined) return false;
+    const matched = processWaiters.filter((w) => w.executionId === active);
+    if (matched.length === 0) return false;
+    for (const w of matched) processWaiters.splice(processWaiters.indexOf(w), 1);
+    cursor += 1;
+    let observation: ProcessObservation;
+    if (next.kind === 'deadline_expiry') {
+      // No exit status is invented: SPEC R7 routes on it, and a timeout is not a failure.
+      observation = { kind: 'timed_out', executionId: active };
+    } else {
+      const result = { exitStatus: next.exit_status, output: next.output };
+      const execution = executions.get(active);
+      if (execution) execution.result = result;
+      activeExecution.delete(next.node);
+      observation = { kind: 'completed', executionId: active, ...result };
+    }
+    for (const w of matched) w.settle(observation);
+    return true;
+  };
+
+  /** Release at most one input per iteration, to whichever work the node has in flight. */
   const pump = (): void => {
     if (!released) return;
     for (;;) {
       const next = head();
       if (next === undefined) return;
-      if (next.kind !== 'agent_result' && next.kind !== 'deadline_expiry') return;
-      const active = activeTurn.get(next.node);
-      if (active === undefined) return;
-      const matched = waiters.filter((w) => w.turnId === active);
-      if (matched.length === 0) return;
-      for (const w of matched) waiters.splice(waiters.indexOf(w), 1);
-      cursor += 1;
-      const turn = turns.get(active);
-      let observation: AgentObservation;
-      if (next.kind === 'deadline_expiry') {
-        // The turn's deadline passed, so readiness is undetermined — not a settled pane, and not
-        // an inspection timeout, which is about the inspection rather than the agent.
-        observeNode(next.node, { kind: 'state_unknown', detail: 'the turn deadline passed' });
-        observation = { kind: 'timed_out', turnId: active };
-      } else if (next.result === 'settled') {
-        if (turn) turn.settledText = next.text;
-        activeTurn.delete(next.node);
-        observeNode(next.node, { kind: 'ready' });
-        observation = { kind: 'settled', turnId: active, text: next.text };
-      } else {
-        const detail = `scripted ${next.result} for ${next.node}`;
-        // A blocked turn is an agent waiting at a dialog; an unconfirmed one is uncertainty.
-        // Neither is an agent quietly working, and neither resolves itself.
-        observeNode(
-          next.node,
-          next.result === 'blocked'
-            ? { kind: 'not_ready', detail }
-            : { kind: 'state_unknown', detail },
-        );
-        observation = {
-          kind: next.result === 'blocked' ? 'blocked' : 'unconfirmed',
-          turnId: active,
-          detail,
-        };
-      }
-      for (const w of matched) w.settle(observation);
+      if (next.kind === 'agent_result') {
+        if (!releaseTurn(next)) return;
+      } else if (next.kind === 'gate_result') {
+        if (!releaseGate(next)) return;
+      } else if (next.kind === 'deadline_expiry') {
+        // A node is either an agent or a gate, so at most one of these has anything to release.
+        if (!(activeTurn.has(next.node) ? releaseTurn(next) : releaseGate(next))) return;
+      } else return;
     }
   };
 
@@ -417,9 +500,10 @@ export function createFakeRuntime(config: FakeRuntimeConfig): FakeAgentRuntime {
       const turnId = `turn-${++nextId}` as TurnId;
       const node = nodeOf(agent.pane);
       history.push({ call: 'promptAgent', turnId, pane: agent.pane, prompt, deadline });
-      // An agent runs one turn at a time. An overlapping submission is refused rather than queued,
-      // which would otherwise let a second turn consume the first turn's scripted answer.
-      const busy = node !== undefined && activeTurn.has(node);
+      // A node runs one operation at a time. An overlapping submission is refused rather than
+      // queued, which would otherwise let a second turn consume the first turn's scripted answer.
+      const occupied = node === undefined ? undefined : occupiedBy(node);
+      const busy = occupied !== undefined;
       const cancelled = closed || signal?.aborted === true;
       if (node !== undefined) {
         // Registration order matters: a submission cancelled before dispatch keeps its identity but
@@ -437,7 +521,7 @@ export function createFakeRuntime(config: FakeRuntimeConfig): FakeAgentRuntime {
           : busy
             ? {
                 kind: 'unconfirmed' as const,
-                detail: `node ${node} has an unsettled turn; overlapping submissions are unsupported`,
+                detail: `node ${node} already has an unsettled ${occupied}; one operation per node`,
               }
             : { kind: 'accepted' as const };
       if (outcome.kind === 'accepted' && node !== undefined) observeNode(node, { kind: 'working' });
@@ -503,12 +587,92 @@ export function createFakeRuntime(config: FakeRuntimeConfig): FakeAgentRuntime {
       return Promise.resolve<AgentOutput>({ kind: 'available', turnId, text: turn.settledText });
     },
 
+    /**
+     * Start a gate. Synchronous and identity-first, like `promptAgent`, and bound to `spec.node`:
+     * two gate nodes sharing a command and working directory stay distinct.
+     */
+    startProcess(
+      spec: ProcessSpec,
+      deadline: DeadlineEpochMs,
+      signal?: AbortSignal,
+    ): ProcessLaunch {
+      const executionId = `exec-${++nextExecution}` as ExecutionId;
+      history.push({
+        call: 'startProcess',
+        executionId,
+        node: spec.node,
+        command: spec.command,
+        cwd: spec.cwd,
+        deadline,
+      });
+      const occupied = occupiedBy(spec.node);
+      const busy = occupied !== undefined;
+      const cancelled = closed || signal?.aborted === true;
+      // A launch cancelled before dispatch keeps its identity but never occupies the node, so the
+      // next valid launch is accepted and takes its own result.
+      if (cancelled)
+        executions.set(executionId, { executionId, node: spec.node, undispatched: true });
+      else if (!busy) {
+        executions.set(executionId, { executionId, node: spec.node });
+        activeExecution.set(spec.node, executionId);
+      }
+      const outcome: SubmissionOutcome = cancelled
+        ? { kind: 'cancelled' }
+        : busy
+          ? {
+              kind: 'unconfirmed',
+              detail: `node ${spec.node} already has an unsettled ${occupied}; one operation per node`,
+            }
+          : { kind: 'accepted' };
+      return { executionId, started: Promise.resolve(outcome) };
+    },
+
+    observeProcess(executionId: ExecutionId, deadline: DeadlineEpochMs, signal?: AbortSignal) {
+      history.push({ call: 'observeProcess', executionId, deadline });
+      const execution = executions.get(executionId);
+      if (execution === undefined) {
+        return Promise.resolve<ProcessObservation>({
+          kind: 'unrecoverable',
+          executionId,
+          reason: 'unknown_execution',
+        });
+      }
+      if (closed || signal?.aborted || execution.undispatched)
+        return Promise.resolve<ProcessObservation>({ kind: 'cancelled', executionId });
+      // Retained and replayed, so a paused run recovers a gate result without rerunning the gate.
+      const retained = execution.result;
+      if (retained !== undefined)
+        return Promise.resolve<ProcessObservation>({ kind: 'completed', executionId, ...retained });
+      return new Promise<ProcessObservation>((resolve) => {
+        let done = false;
+        const onAbort = () => {
+          const i = processWaiters.indexOf(waiter);
+          if (i !== -1) processWaiters.splice(i, 1);
+          settle({ kind: 'cancelled', executionId });
+        };
+        const settle = (o: ProcessObservation): void => {
+          if (done) return;
+          done = true;
+          signal?.removeEventListener('abort', onAbort);
+          resolve(o);
+        };
+        const waiter: ProcessWaiter = { executionId, settle };
+        processWaiters.push(waiter);
+        signal?.addEventListener('abort', onAbort);
+        pump();
+      });
+    },
+
     shutdown() {
       history.push({ call: 'shutdown' });
       closed = true;
       while (waiters.length > 0) {
         const waiter = waiters.pop() as Waiter;
         waiter.settle({ kind: 'cancelled', turnId: waiter.turnId });
+      }
+      while (processWaiters.length > 0) {
+        const waiter = processWaiters.pop() as ProcessWaiter;
+        waiter.settle({ kind: 'cancelled', executionId: waiter.executionId });
       }
       return Promise.resolve();
     },

@@ -229,6 +229,14 @@ export interface ProcessLaunch {
 
 /** What to run for a gate. */
 export interface ProcessSpec {
+  /**
+   * The pipeline node this execution belongs to — identity, not decoration.
+   *
+   * Two gate nodes may legitimately share a command and a working directory, and their results must
+   * never be confused, so the caller names the node rather than leaving a runtime to guess it from
+   * the command. Display labels are a separate concern and are not identity.
+   */
+  readonly node: string;
   readonly command: string;
   readonly cwd: string;
 }
