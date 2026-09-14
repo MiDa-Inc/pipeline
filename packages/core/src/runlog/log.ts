@@ -1,6 +1,7 @@
 import {
   appendFileSync,
   closeSync,
+  existsSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -116,7 +117,12 @@ export type RunLogFault =
    * and authoritative; only its cache is behind, so the fix is to project again, never to append
    * the event a second time.
    */
-  | 'snapshot_failed';
+  | 'snapshot_failed'
+  /**
+   * The snapshot could not be rebuilt when the run was opened. Nothing was appended, so the log is
+   * byte-identical and whatever snapshot already existed is untouched.
+   */
+  | 'rebuild_failed';
 
 /**
  * What became of the log's bytes when a fault was raised. Three states, not two: a fault can follow
@@ -297,18 +303,6 @@ export interface RunLog {
  */
 export function openRunLog(baseDir: string, runId: string, options: RunLogOptions = {}): RunLog {
   const paths = createRunFolder(baseDir, runId);
-  const read = readEvents(paths.events);
-  if (read.damagedTail !== undefined)
-    throw new RunLogError(
-      'damaged_tail',
-      paths.events,
-      read.damagedTail.detail,
-      'unchanged',
-      read.damagedTail,
-    );
-  const owner = read.events[0]?.run_id;
-  if (owner !== undefined && owner !== runId)
-    throw corrupt(paths.events, 1, `log belongs to run ${owner}, not ${runId}`);
   const now = options.now ?? (() => new Date());
   const writeLine = options.writeLine ?? ((path, line) => appendFileSync(path, line));
   const lockPath = `${paths.events}.lock`;
@@ -376,11 +370,79 @@ export function openRunLog(baseDir: string, runId: string, options: RunLogOption
       };
     }
   };
-  let nextSeq = (read.events.at(-1)?.seq ?? 0) + 1;
   /** Set once this handle may no longer write. Recovery is reopening the run, never continuing. */
   let invalid: RunLogError | undefined;
-  /** The last publication failure on a committed event. It does not stop the handle writing again. */
+  /** The last publication failure. It does not stop the handle writing again. */
   let snapshotFault: RunLogError | undefined;
+
+  /**
+   * Run one operation with the log's lock held throughout, and release it afterwards without ever
+   * replacing what the operation itself concluded. A lock that could not be released is reported
+   * either way: as a fault on the handle when the operation succeeded, and appended to the failure
+   * when it did not, so the stranded lock is discoverable in both cases.
+   *
+   * `append` keeps its own release handling: its residue must report the event's bytes as
+   * `committed`, which this helper has no way to know.
+   */
+  const withLock = <T>(body: () => T): T => {
+    const release = acquire();
+    let result: T | undefined;
+    let failure: unknown;
+    try {
+      result = body();
+    } catch (cause) {
+      failure = cause;
+    }
+    const stuck = release();
+    if (stuck !== undefined) {
+      const note = `${lockPath} could not be released (${stuck}) and remains`;
+      if (failure === undefined)
+        invalid ??= new RunLogError('lock_residue', paths.events, note, 'unchanged');
+      else (failure as Error).message += `; ${note}`;
+    }
+    if (failure !== undefined) throw failure;
+    return result as T;
+  };
+
+  /**
+   * One locked read supplies everything this handle starts from: the events it reports as
+   * `existing`, the `seq` it will append next, and the snapshot republished from them. Reading
+   * once under the lock is what stops an older projection being published over a newer one — a
+   * second, earlier read would let this handle publish a log state that has since moved on.
+   *
+   * A run with no events and no snapshot has nothing to project, so it is left alone entirely.
+   */
+  const read = withLock((): ReadResult => {
+    const seen = readEvents(paths.events);
+    if (seen.damagedTail !== undefined)
+      throw new RunLogError(
+        'damaged_tail',
+        paths.events,
+        seen.damagedTail.detail,
+        'unchanged',
+        seen.damagedTail,
+      );
+    const owner = seen.events[0]?.run_id;
+    if (owner !== undefined && owner !== runId)
+      throw corrupt(paths.events, 1, `log belongs to run ${owner}, not ${runId}`);
+    if (seen.events.length > 0 || existsSync(paths.state)) {
+      try {
+        publishSnapshot(paths, replay(seen.events), options.snapshot ?? {});
+      } catch (cause) {
+        // Nothing was appended, so the log's bytes are exactly as they were; an unprojectable or
+        // unpublishable log simply keeps whatever snapshot it already had.
+        snapshotFault = new RunLogError(
+          'rebuild_failed',
+          paths.events,
+          `the snapshot could not be rebuilt: ${(cause as Error).message}`,
+          'unchanged',
+        );
+      }
+    }
+    return seen;
+  });
+
+  let nextSeq = (read.events.at(-1)?.seq ?? 0) + 1;
 
   return {
     paths,

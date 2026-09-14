@@ -4,7 +4,9 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  rmSync,
   writeFileSync,
+  writeSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -38,6 +40,29 @@ const valid = (event: PipelineEvent): true | string =>
   validateEvent(event) ? true : JSON.stringify(validateEvent.errors);
 
 const base = () => mkdtempSync(join(tmpdir(), 'pipeline-runlog-'));
+/**
+ * Opening a run now takes the lock for its authoritative read, so an injected lock failure would
+ * land there instead of on the append under test. These let the open-time cycle behave normally
+ * and fail from the next call onward.
+ */
+const afterOpen = {
+  remove: (message: string) => {
+    let calls = 0;
+    return (path: string): void => {
+      calls += 1;
+      if (calls > 1) throw new Error(message);
+      rmSync(path, { force: true });
+    };
+  },
+  stamp: (message: string) => {
+    let calls = 0;
+    return (fd: number): void => {
+      calls += 1;
+      if (calls > 1) throw new Error(message);
+      writeSync(fd, `${process.pid}\n`);
+    };
+  },
+};
 const clock = () => {
   let t = Date.parse('2026-09-13T09:00:00Z');
   return () => new Date((t += 1000));
@@ -389,9 +414,7 @@ describe('publishing the projection', () => {
         },
       },
       lock: {
-        remove: () => {
-          throw new Error('EACCES: permission denied');
-        },
+        remove: afterOpen.remove('EACCES: permission denied'),
       },
     });
     const event = log.append(script[0] as EventPayload);
@@ -422,6 +445,156 @@ describe('publishing the projection', () => {
     expect(() => attempt(log)).toThrow(RunLogError);
     expect(readFileSync(log.paths.state, 'utf8')).toBe(published); // unchanged by a refusal
     expect(log.snapshotFault).toBeUndefined();
+  });
+});
+
+describe('rebuilding the projection on open', () => {
+  const withEvents = (howMany: number) => {
+    const dir = base();
+    const log = openRunLog(dir, 'run-16', { now: clock() });
+    for (const payload of script.slice(0, howMany)) log.append(payload as EventPayload);
+    return { dir, log };
+  };
+  const reopen = (dir: string, options: Parameters<typeof openRunLog>[2] = {}) =>
+    openRunLog(dir, 'run-16', { now: clock(), ...options });
+
+  it.each([
+    ['missing', (paths: { state: string }) => rmSync(paths.state)],
+    ['unparseable', (paths: { state: string }) => writeFileSync(paths.state, '{ not json', 'utf8')],
+    [
+      'wrong in every field but lastSeq',
+      (paths: { state: string }) =>
+        writeFileSync(
+          paths.state,
+          // the right sequence and nothing else right: a lastSeq comparison would accept this
+          JSON.stringify({
+            lastSeq: 3,
+            eventCount: 3,
+            extraRoundsGranted: 9,
+            handoffs: [],
+            runId: 'someone-else',
+            task: 'a different task',
+            status: 'done',
+          }),
+          'utf8',
+        ),
+    ],
+    [
+      'a projection of an earlier round',
+      (paths: { state: string }) =>
+        writeFileSync(paths.state, JSON.stringify({ lastSeq: 1, eventCount: 1 }), 'utf8'),
+    ],
+  ])('republishes a snapshot that is %s', (_label, damage) => {
+    const { dir, log } = withEvents(3);
+    damage(log.paths);
+    const reopened = reopen(dir);
+    expect(readSnapshot(reopened.paths)).toEqual(projectLog(reopened.paths));
+    expect(readSnapshot(reopened.paths)).toMatchObject({ lastSeq: 3, runId: 'run-16' });
+    expect(reopened.snapshotFault).toBeUndefined();
+  });
+
+  it('draws existing, nextSeq and the snapshot from the same locked read', () => {
+    const { dir, log } = withEvents(1);
+    const extra = {
+      type: 'node_started',
+      node: 'implementer',
+      round: 1,
+      run_id: 'run-16',
+      seq: 2,
+      ts: '2026-09-13T09:00:09Z',
+    };
+    // the log grows after the lock is taken but before the read: a handle that had read earlier
+    // would publish the state it saw before this landed
+    const reopened = reopen(dir, {
+      lock: {
+        stamp: (fd) => {
+          writeSync(fd, `${process.pid}\n`);
+          appendFileSync(log.paths.events, `${JSON.stringify(extra)}\n`);
+        },
+      },
+    });
+    expect(reopened.existing).toHaveLength(2);
+    expect(reopened.nextSeq).toBe(3);
+    expect(readSnapshot(reopened.paths)).toMatchObject({ lastSeq: 2 });
+  });
+
+  it('leaves a fresh run alone, publishing nothing before its first event', () => {
+    const dir = base();
+    const log = openRunLog(dir, 'run-17', { now: clock() });
+    expect(existsSync(log.paths.state)).toBe(false);
+    expect(log.snapshotFault).toBeUndefined();
+  });
+
+  it.each([
+    [
+      'a log that cannot be replayed',
+      (paths: { events: string }) =>
+        appendFileSync(
+          paths.events,
+          `${JSON.stringify({
+            type: 'node_started',
+            node: 'b',
+            round: 1,
+            run_id: 'run-16',
+            seq: 4,
+            ts: '2026-09-13T09:00:09Z',
+          })}\n`,
+        ),
+      {},
+    ],
+    [
+      'a snapshot that cannot be written',
+      () => undefined,
+      {
+        snapshot: {
+          write: () => {
+            throw new Error('ENOSPC: no space left on device');
+          },
+        },
+      },
+    ],
+  ])('reports %s without touching the log or its snapshot', (_label, damage, options) => {
+    const { dir, log } = withEvents(3);
+    const snapshot = readFileSync(log.paths.state, 'utf8');
+    damage(log.paths);
+    const events = readFileSync(log.paths.events, 'utf8');
+    const reopened = reopen(dir, options);
+    expect(reopened.snapshotFault).toMatchObject({ fault: 'rebuild_failed', bytes: 'unchanged' });
+    expect(readFileSync(reopened.paths.state, 'utf8')).toBe(snapshot); // the old one survives
+    expect(readFileSync(reopened.paths.events, 'utf8')).toBe(events); // nothing was appended
+  });
+
+  it('reports a lock it could not release after rebuilding', () => {
+    const { dir, log } = withEvents(2);
+    const reopened = reopen(dir, {
+      lock: {
+        remove: () => {
+          throw new Error('EACCES: permission denied');
+        },
+      },
+    });
+    expect(readSnapshot(reopened.paths)).toEqual(projectLog(log.paths)); // the rebuild happened
+    expect(reopened.fault).toMatchObject({ fault: 'lock_residue', bytes: 'unchanged' });
+    expect(reopened.fault?.message).toContain(`${log.paths.events}.lock`);
+  });
+
+  it('names a stranded lock alongside a refusal to open', () => {
+    const { dir, log } = withEvents(2);
+    appendFileSync(log.paths.events, '{"torn');
+    let thrown: RunLogError | undefined;
+    try {
+      reopen(dir, {
+        lock: {
+          remove: () => {
+            throw new Error('EACCES: permission denied');
+          },
+        },
+      });
+    } catch (error) {
+      thrown = error as RunLogError;
+    }
+    expect(thrown?.fault).toBe('damaged_tail'); // the refusal is still the outcome
+    expect(thrown?.message).toMatch(/could not be released .* and remains/); // and the lock is named
   });
 });
 
@@ -543,9 +716,7 @@ describe('a damaged tail', () => {
   it('keeps the append outcome when releasing the lock fails', () => {
     const dir = base();
     const stuck = {
-      remove: () => {
-        throw new Error('EACCES: cannot unlink');
-      },
+      remove: afterOpen.remove('EACCES: cannot unlink'),
     };
     const log = openRunLog(dir, 'run-10', { now: clock(), lock: stuck });
     // the event commits; a cleanup failure afterwards is not a rejected append
@@ -567,9 +738,7 @@ describe('a damaged tail', () => {
     const log = openRunLog(dir, 'run-11', {
       now: clock(),
       lock: {
-        remove: () => {
-          throw new Error('EACCES: cannot unlink');
-        },
+        remove: afterOpen.remove('EACCES: cannot unlink'),
       },
       writeLine: (path, line) => {
         appendFileSync(path, line.slice(0, 12));
@@ -593,12 +762,8 @@ describe('a damaged tail', () => {
     const log = openRunLog(dir, 'run-13', {
       now: clock(),
       lock: {
-        stamp: () => {
-          throw new Error('ENOSPC: no space left on device');
-        },
-        remove: () => {
-          throw new Error('EACCES: permission denied');
-        },
+        stamp: afterOpen.stamp('ENOSPC: no space left on device'),
+        remove: afterOpen.remove('EACCES: permission denied'),
       },
     });
     let thrown: RunLogError | undefined;
@@ -621,9 +786,7 @@ describe('a damaged tail', () => {
     const failing = openRunLog(dir, 'run-12', {
       now: clock(),
       lock: {
-        stamp: () => {
-          throw new Error('ENOSPC: no space left on device');
-        },
+        stamp: afterOpen.stamp('ENOSPC: no space left on device'),
       },
     });
     expect(() => failing.append(script[0] as EventPayload)).toThrow(/could not claim/);
