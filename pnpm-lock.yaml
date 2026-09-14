@@ -58,7 +58,11 @@ importers:
 
   packages/profiles: {}
 
-  packages/runtime: {}
+  packages/runtime:
+    devDependencies:
+      '@types/node':
+        specifier: ^20.19.9
+        version: 20.19.43
 
   packages/server: {}
 
