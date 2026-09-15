@@ -6,7 +6,7 @@ import { join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { ExecutionId, ProcessObservation } from '../src/adapter.js';
+import type { DeadlineEpochMs, ExecutionId, ProcessObservation } from '../src/adapter.js';
 import { createGateRunner, type GateRunnerOptions } from '../src/herdr/process.js';
 
 const dir = mkdtempSync(join(tmpdir(), 'pipeline-gate-'));
@@ -31,12 +31,36 @@ const marker = (name: string) => {
   return path;
 };
 
+/**
+ * Look again until the runtime holds a result.
+ *
+ * A shut-down runtime waits for nothing, so an observation of a gate that has not published yet is
+ * answered `cancelled` at once. The result still arrives; finding it means asking again. The marker
+ * a child writes says it is about to exit, not that its streams have closed.
+ */
+const eventually = async (look: () => Promise<ProcessObservation>, within = 5_000) => {
+  const until = Date.now() + within;
+  for (;;) {
+    const observation = await look();
+    if (observation.kind === 'completed') return observation;
+    if (Date.now() > until) throw new Error(`still ${observation.kind} after ${within}ms`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+};
+
+/** A dispatch that must never happen: reaching it is the defect, not an error to handle. */
+let spawnAttempts = 0;
+const refuseToSpawn = (() => {
+  spawnAttempts += 1;
+  throw new Error('nothing should have been dispatched');
+}) as unknown as typeof spawn;
+
 /** A deadline no test here should ever reach, for the cases that are not about deadlines. */
 const LATER = () => Date.now() + 30_000;
 
 const run = async (command: string, options: GateRunnerOptions = {}, deadline = LATER()) => {
   const runner = createGateRunner(options);
-  const launch = runner.start({ node: 'test_gate', command, cwd: dir });
+  const launch = runner.start({ node: 'test_gate', command, cwd: dir }, LATER());
   return {
     launch,
     started: await launch.started,
@@ -54,7 +78,7 @@ const completed = (observation: ProcessObservation) => {
 describe('running a gate', () => {
   it('hands back an identity before any output, and accepts the launch', async () => {
     const runner = createGateRunner();
-    const launch = runner.start({ node: 'test_gate', command: 'echo ok', cwd: dir });
+    const launch = runner.start({ node: 'test_gate', command: 'echo ok', cwd: dir }, LATER());
     expect(launch.executionId).toBeTruthy(); // available synchronously
     await expect(launch.started).resolves.toEqual({ kind: 'accepted' });
   });
@@ -67,7 +91,7 @@ describe('running a gate', () => {
         return spawn(...args);
       },
     });
-    const launch = runner.start({ node: 'test_gate', command: 'echo ok', cwd: dir });
+    const launch = runner.start({ node: 'test_gate', command: 'echo ok', cwd: dir }, LATER());
     expect(launch.executionId).toBeTruthy();
     expect(dispatched).toBe(0); // nothing is started while the caller has no handle yet
     await expect(launch.started).resolves.toEqual({ kind: 'accepted' });
@@ -164,7 +188,7 @@ describe('ends that produce no exit status', () => {
     const runner = createGateRunner('shell' in shape ? { shell: shape.shell as string } : {});
     const command = 'command' in shape ? (shape.command as string) : 'echo ok';
     // the handle exists before anything is dispatched, so there is always something to observe
-    const launch = runner.start({ node: 'test_gate', command, cwd: dir });
+    const launch = runner.start({ node: 'test_gate', command, cwd: dir }, LATER());
     expect(launch.executionId).toBeTruthy();
     const started = await launch.started;
     expect(started).toMatchObject({ kind: 'failed' });
@@ -177,13 +201,14 @@ describe('ends that produce no exit status', () => {
     const release = marker('overflow-release');
     const finished = marker('overflow-finished');
     const runner = createGateRunner({ outputLimit: 1024 });
-    const launch = runner.start({
-      node: 'test_gate',
-      cwd: dir,
-      // floods past the cap, then cannot finish until this test says so
-      command: script(
-        'barrier',
-        `import { existsSync, writeFileSync } from 'node:fs';
+    const launch = runner.start(
+      {
+        node: 'test_gate',
+        cwd: dir,
+        // floods past the cap, then cannot finish until this test says so
+        command: script(
+          'barrier',
+          `import { existsSync, writeFileSync } from 'node:fs';
          process.stdout.write('x'.repeat(64 * 1024));
          const until = Date.now() + 5000;
          const tick = () => {
@@ -194,10 +219,12 @@ describe('ends that produce no exit status', () => {
            setTimeout(tick, 10);
          };
          tick();`
-          .replace('RELEASE', JSON.stringify(release))
-          .replace('FINISHED', JSON.stringify(finished)),
-      ),
-    });
+            .replace('RELEASE', JSON.stringify(release))
+            .replace('FINISHED', JSON.stringify(finished)),
+        ),
+      },
+      LATER(),
+    );
 
     const observed = await runner.observe(launch.executionId, LATER());
     expect(observed).toMatchObject({ kind: 'unrecoverable', reason: 'output_limit_exceeded' });
@@ -211,21 +238,24 @@ describe('ends that produce no exit status', () => {
   it('keeps draining after the refusal, so the gate is never stuck on a full pipe', async () => {
     const wrote = marker('drain-wrote');
     const runner = createGateRunner({ outputLimit: 1024 });
-    const launch = runner.start({
-      node: 'test_gate',
-      cwd: dir,
-      // far more than any pipe buffer: these writes only complete if the parent keeps reading
-      command: script(
-        'backpressure',
-        `import { writeFileSync } from 'node:fs';
+    const launch = runner.start(
+      {
+        node: 'test_gate',
+        cwd: dir,
+        // far more than any pipe buffer: these writes only complete if the parent keeps reading
+        command: script(
+          'backpressure',
+          `import { writeFileSync } from 'node:fs';
          const chunk = 'y'.repeat(64 * 1024);
          for (let i = 0; i < 40; i++) process.stdout.write(chunk);
          process.stdout.end(() => {
            writeFileSync(WROTE, '1');
            process.exit(0);
          });`.replace('WROTE', JSON.stringify(wrote)),
-      ),
-    });
+        ),
+      },
+      LATER(),
+    );
 
     const observed = await runner.observe(launch.executionId, LATER());
     expect(observed).toMatchObject({ kind: 'unrecoverable', reason: 'output_limit_exceeded' });
@@ -324,7 +354,7 @@ const lingering = (name: string) => {
 const startLingering = async (name: string, options: GateRunnerOptions = {}) => {
   const gate = lingering(name);
   const runner = createGateRunner(options);
-  const launch = runner.start({ node: 'test_gate', command: gate.command, cwd: dir });
+  const launch = runner.start({ node: 'test_gate', command: gate.command, cwd: dir }, LATER());
   expect(await launch.started).toEqual({ kind: 'accepted' });
   return { ...gate, runner, id: launch.executionId };
 };
@@ -505,22 +535,47 @@ describe('several observers of one gate', () => {
  * no test can wait out and a clock moving between two statements. So the child is a stub, the
  * endings are emitted by hand, and the clock is a variable.
  */
-const stubbed = async (options: GateRunnerOptions) => {
+interface StubLaunch {
+  deadline?: DeadlineEpochMs;
+  signal?: AbortSignal;
+  /** Emit `spawn` at once. Withheld when a test needs the acknowledgement left outstanding. */
+  acknowledge?: boolean;
+  /** Let the dispatch itself fail, the way an unusable shell does. */
+  fail?: boolean;
+}
+
+const stubbed = async (options: GateRunnerOptions, how: StubLaunch = {}) => {
+  const acknowledge = how.acknowledge ?? how.fail !== true;
   let child: EventEmitter & { stdout: EventEmitter; stderr: EventEmitter };
+  let spawns = 0;
   const runner = createGateRunner({
     ...options,
     spawn: (() => {
+      spawns += 1;
+      if (how.fail === true) throw new Error('a shell that cannot be named');
       child = Object.assign(new EventEmitter(), {
         stdout: new EventEmitter(),
         stderr: new EventEmitter(),
       });
-      queueMicrotask(() => child.emit('spawn'));
+      if (acknowledge) queueMicrotask(() => child.emit('spawn'));
       return child;
     }) as unknown as typeof spawn,
   });
-  const launch = runner.start({ node: 'test_gate', command: 'a test double', cwd: dir });
-  expect(await launch.started).toEqual({ kind: 'accepted' });
-  return { runner, id: launch.executionId, close: () => child.emit('close', 0, null) };
+  const launch = runner.start(
+    { node: 'test_gate', command: 'a test double', cwd: dir },
+    how.deadline ?? LATER(),
+    how.signal,
+  );
+  if (acknowledge) expect(await launch.started).toEqual({ kind: 'accepted' });
+  else await Promise.resolve(); // let the queued dispatch run, without acknowledging it
+  return {
+    runner,
+    launch,
+    id: launch.executionId,
+    spawns: () => spawns,
+    spawned: () => child.emit('spawn'),
+    close: () => child.emit('close', 0, null),
+  };
 };
 
 describe('a deadline the test moves the clock to', () => {
@@ -553,9 +608,14 @@ describe('a deadline the test moves the clock to', () => {
     // The clock passes the deadline between the entry check and the arming. Reached is reached: the
     // arming expires at once and tears down the abort listener installed just before it, so the
     // abort arriving immediately afterwards has nothing left to cancel.
-    let reads = 0;
     const deadline = 1_000_000;
-    const gate = await stubbed({ now: () => (++reads === 1 ? deadline - 1 : deadline) });
+    // The launch reads the clock several times of its own, so the crossing sequence is armed only
+    // once the launch is acknowledged — otherwise observation would begin already past the
+    // deadline and take the early refusal, never reaching the setup being tested.
+    let reads = 0;
+    let clock = () => deadline - 1_000;
+    const gate = await stubbed({ now: () => clock() });
+    clock = () => (++reads === 1 ? deadline - 1 : deadline);
     const controller = new AbortController();
     const observation = gate.runner.observe(gate.id, deadline, controller.signal);
     controller.abort();
@@ -602,4 +662,213 @@ describe('a deadline the test moves the clock to', () => {
       expect(reads).toBe(0);
     },
   );
+
+  it('answers an acknowledgement the deadline outran, and keeps collecting the gate', async () => {
+    let clock = 1_000_000;
+    const deadline = clock + 60_000;
+    const gate = await stubbed({ now: () => clock }, { deadline, acknowledge: false });
+    clock = deadline;
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    const started = await gate.launch.started;
+    // not `failed`: a shell was handed the command, so nobody may claim nothing ran
+    expect(started).toMatchObject({ kind: 'unconfirmed' });
+    expect((started as { detail: string }).detail).toMatch(/a shell may be running/);
+
+    gate.spawned(); // the acknowledgement arriving late changes nothing about the answer given
+    expect(await gate.launch.started).toBe(started);
+    gate.close();
+    expect(await gate.runner.observe(gate.id, clock + 60_000)).toMatchObject({ kind: 'completed' });
+  });
+
+  it('will not let an overdue acknowledgement come back as accepted', async () => {
+    // the clock is past the deadline while the timer that would have said so has not run
+    let clock = 1_000_000;
+    const deadline = clock + 60_000;
+    const gate = await stubbed({ now: () => clock }, { deadline, acknowledge: false });
+    clock = deadline + 1;
+    gate.spawned();
+    const started = await gate.launch.started;
+    expect(started).toMatchObject({ kind: 'unconfirmed' });
+    expect((started as { detail: string }).detail).toMatch(/acknowledged only after the deadline/);
+  });
+
+  it.each([
+    ['acceptance', { kind: 'accepted' }],
+    ['a shell that will not start', { kind: 'failed' }],
+    ['the deadline', { kind: 'unconfirmed' }],
+    ['abort', { kind: 'cancelled' }],
+    ['shutdown', { kind: 'cancelled' }],
+  ] as const)('releases the acknowledgement timer and listener on %s', async (ending, expected) => {
+    let clock = 1_000_000;
+    const deadline = clock + 60_000;
+    const controller = new AbortController();
+    const gate = await stubbed(
+      { now: () => clock },
+      {
+        deadline,
+        signal: controller.signal,
+        fail: ending === 'a shell that will not start',
+        acknowledge: ending === 'acceptance',
+      },
+    );
+
+    if (ending === 'the deadline') {
+      clock = deadline;
+      await vi.advanceTimersByTimeAsync(60_000);
+    } else if (ending === 'abort') controller.abort();
+    else if (ending === 'shutdown') await gate.runner.shutdown();
+    expect(await gate.launch.started).toMatchObject(expected);
+
+    // the launch's own deadline and its own abort listener, which the observation cases above
+    // never install: an acknowledgement that has been given owns neither any more
+    expect(vi.getTimerCount()).toBe(0);
+    expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0);
+  });
+
+  it('cancels an unfinished execution, and sets up no waiting, once shut down', async () => {
+    const clock = 1_000_000;
+    const gate = await stubbed({ now: () => clock });
+    await gate.runner.shutdown();
+    // and a spent deadline is the one answer this must not give: nothing here ran out of time
+    expect(await gate.runner.observe(gate.id, clock - 1_000)).toEqual({
+      kind: 'cancelled',
+      executionId: gate.id,
+    });
+    expect(vi.getTimerCount()).toBe(0); // nothing was armed, so nothing has to be torn down
+  });
+});
+
+describe('shutting the runner down', () => {
+  it('settles the observations outstanding at the time, and keeps them settled', async () => {
+    const gate = await startLingering('shutdown-observers');
+    const first = gate.runner.observe(gate.id, LATER());
+    const second = gate.runner.observe(gate.id, LATER());
+    await gate.runner.shutdown();
+    expect(await first).toEqual({ kind: 'cancelled', executionId: gate.id });
+    expect(await second).toEqual({ kind: 'cancelled', executionId: gate.id });
+
+    // the gate goes on to finish; a waiter already cancelled stays cancelled, and the result it
+    // never received is still the runtime's to hand back
+    gate.release();
+    await waitFor(gate.finished);
+    expect(await first).toEqual({ kind: 'cancelled', executionId: gate.id });
+    const later = await eventually(() => gate.runner.observe(gate.id, LATER()));
+    expect(later).toMatchObject({ exitStatus: 0 });
+  });
+
+  it('leaves running gates alone, and replays what they produce afterwards', async () => {
+    const gate = await startLingering('shutdown-children');
+    await gate.runner.shutdown();
+    expect(existsSync(gate.finished)).toBe(false); // still running after shutdown resolved
+    gate.release();
+    await waitFor(gate.finished); // and it got to finish, on its own terms
+    expect(await eventually(() => gate.runner.observe(gate.id, LATER()))).toMatchObject({
+      exitStatus: 0,
+      output: 'done\n',
+    });
+  });
+
+  it('is idempotent', async () => {
+    const gate = await startLingering('shutdown-twice');
+    await gate.runner.shutdown();
+    await expect(gate.runner.shutdown()).resolves.toBeUndefined();
+    expect(await gate.runner.observe(gate.id, LATER())).toMatchObject({ kind: 'cancelled' });
+    gate.release();
+  });
+
+  it('settles a pending acknowledgement, which a late spawn cannot then replace', async () => {
+    const gate = await stubbed({}, { acknowledge: false });
+    expect(gate.spawns()).toBe(1); // dispatched: a child of some sort exists
+    await gate.runner.shutdown();
+    expect(await gate.launch.started).toEqual({ kind: 'cancelled' });
+
+    gate.spawned(); // the shell reports itself after the fact; the caller was already told
+    expect(await gate.launch.started).toEqual({ kind: 'cancelled' });
+    gate.close(); // and the child was never touched, so its result is still collected
+    expect(await gate.runner.observe(gate.id, LATER())).toMatchObject({ kind: 'completed' });
+  });
+
+  it.each(['before its queued dispatch runs', 'after shutdown'] as const)(
+    'starts no shell for a launch %s',
+    async (when) => {
+      const runner = createGateRunner({ spawn: refuseToSpawn });
+      if (when === 'after shutdown') await runner.shutdown();
+      const launch = runner.start({ node: 'test_gate', command: 'echo ok', cwd: dir }, LATER());
+      if (when !== 'after shutdown') await runner.shutdown();
+
+      expect(await launch.started).toEqual({ kind: 'cancelled' });
+      expect(spawnAttempts).toBe(0);
+      // the identity was issued, so it has to mean something rather than wait for ever
+      expect(await runner.observe(launch.executionId, LATER())).toEqual({
+        kind: 'cancelled',
+        executionId: launch.executionId,
+      });
+    },
+  );
+});
+
+describe('bounding a launch', () => {
+  it('refuses to dispatch a launch whose deadline is already gone', async () => {
+    const runner = createGateRunner({ spawn: refuseToSpawn });
+    const launch = runner.start(
+      { node: 'test_gate', command: 'echo ok', cwd: dir },
+      Date.now() - 1,
+    );
+    const started = await launch.started;
+    // `failed`, not `unconfirmed`: nothing was handed to a shell, and that is not in doubt
+    expect(started).toMatchObject({ kind: 'failed' });
+    expect((started as { detail: string }).detail).toMatch(/deadline passed before dispatch/);
+    expect(spawnAttempts).toBe(0);
+
+    const observed = await runner.observe(launch.executionId, LATER());
+    expect(observed).toMatchObject({ kind: 'unrecoverable', reason: 'spawn_failed' });
+    expect((observed as { detail: string }).detail).toMatch(/no shell was started/);
+  });
+
+  it('refuses to dispatch when the deadline passes after the handle is returned', async () => {
+    // start() answers synchronously and dispatch runs a microtask later. The check that matters is
+    // the one made *then*: an answer cached at start() would still have found time on the clock.
+    let clock = 1_000_000;
+    const deadline = clock + 1_000;
+    const runner = createGateRunner({ spawn: refuseToSpawn, now: () => clock });
+    const launch = runner.start({ node: 'test_gate', command: 'echo ok', cwd: dir }, deadline);
+    clock = deadline;
+
+    const started = await launch.started;
+    expect(started).toMatchObject({ kind: 'failed' });
+    expect((started as { detail: string }).detail).toMatch(/deadline passed before dispatch/);
+    expect(spawnAttempts).toBe(0);
+    expect(await runner.observe(launch.executionId, deadline + 10_000)).toMatchObject({
+      kind: 'unrecoverable',
+      reason: 'spawn_failed',
+    });
+  });
+
+  it('dispatches nothing for a caller who aborted first', async () => {
+    const runner = createGateRunner({ spawn: refuseToSpawn });
+    const launch = runner.start(
+      { node: 'test_gate', command: 'echo ok', cwd: dir },
+      LATER(),
+      AbortSignal.abort(),
+    );
+    expect(await launch.started).toEqual({ kind: 'cancelled' });
+    expect(spawnAttempts).toBe(0);
+    expect(await runner.observe(launch.executionId, LATER())).toEqual({
+      kind: 'cancelled',
+      executionId: launch.executionId,
+    });
+  });
+
+  it('cancels a pending acknowledgement on abort, and leaves the gate collecting', async () => {
+    const controller = new AbortController();
+    const gate = await stubbed({}, { acknowledge: false, signal: controller.signal });
+    expect(gate.spawns()).toBe(1);
+    controller.abort();
+    expect(await gate.launch.started).toEqual({ kind: 'cancelled' });
+    // the signal bounded the submission; the command it started is none of its business
+    gate.spawned();
+    gate.close();
+    expect(await gate.runner.observe(gate.id, LATER())).toMatchObject({ kind: 'completed' });
+  });
 });

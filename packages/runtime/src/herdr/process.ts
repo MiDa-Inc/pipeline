@@ -17,8 +17,18 @@ import type {
  * no exit status anywhere — see the departure recorded in PLAN.md step 11. SPEC R7 routes on a real
  * exit status, so gates are spawned directly.
  *
- * Nothing here is exported from the package yet: a complete `RuntimeAdapter` still needs the
- * shutdown behaviour that slice 11c-2b adds, and half of one would be worse than none.
+ * Nothing here is exported from the package yet: what the package exports is an adapter-shaped
+ * object, which slice 11c-2b-2 composes from this and the layout module.
+ *
+ * **A launch and its execution are two different things.** `deadline` and `signal` bound the
+ * *acknowledgement* — whether the command was handed to a shell — exactly as `adapter.ts` says a
+ * submission's do. They say nothing about the command itself. So a launch whose deadline passes
+ * while the acknowledgement is outstanding is `unconfirmed` rather than failed: a shell may well be
+ * running, and its result is still collected and retained for whoever observes it.
+ *
+ * Once an acknowledgement settles it stays settled. A `spawn` event arriving after shutdown has
+ * cancelled the launch cannot turn it back into `accepted`, because the caller has already been
+ * told, and told once.
  *
  * **Waiting is the caller's, the result is the execution's.** An execution ends once and keeps that
  * ending; observers come and go around it. A deadline or an abort ends only the waiting it was given
@@ -74,17 +84,45 @@ export interface GateRunnerOptions {
   readonly now?: () => number;
 }
 
+/**
+ * One caller waiting on one execution.
+ *
+ * The two ways a wait ends from outside are kept apart: `deliver` carries the execution's own
+ * result, which the waiter still measures against its deadline, while `cancel` ends the waiting
+ * and claims nothing about the execution at all.
+ */
+interface Waiter {
+  deliver(result: ProcessObservation): void;
+  cancel(): void;
+}
+
 interface Execution {
   readonly executionId: ExecutionId;
   /** Set once the process ended, in whatever way. Retained and replayed unchanged. */
   result?: ProcessObservation;
   /** Observers waiting on this execution. Each settles on its own terms; none of them owns it. */
-  readonly waiters: Set<(result: ProcessObservation) => void>;
+  readonly waiters: Set<Waiter>;
+  /** Settles this launch's acknowledgement. First call wins; later ones are ignored. */
+  acknowledge(outcome: SubmissionOutcome): void;
 }
 
 export interface GateRunner {
-  /** Synchronous and identity-first: the id exists before any I/O, as the adapter requires. */
-  start(spec: ProcessSpec): ProcessLaunch;
+  /**
+   * Synchronous and identity-first: the id exists before any I/O, as the adapter requires.
+   *
+   * `deadline` and `signal` bound the acknowledgement, never the command:
+   *
+   * | before dispatch                    | `started`                                    |
+   * | ---------------------------------- | -------------------------------------------- |
+   * | shut down, or already aborted      | `cancelled`, and no shell is started         |
+   * | the deadline has passed            | `failed`, and no shell is started            |
+   *
+   * | while the acknowledgement is outstanding | `started`                               |
+   * | ---------------------------------------- | --------------------------------------- |
+   * | the deadline passes                      | `unconfirmed`; collection continues     |
+   * | aborted, or the runtime shuts down       | `cancelled`; the child keeps running    |
+   */
+  start(spec: ProcessSpec, deadline: DeadlineEpochMs, signal?: AbortSignal): ProcessLaunch;
   /**
    * Waits for the execution to end, for as long as `deadline` and `signal` allow.
    *
@@ -101,6 +139,18 @@ export interface GateRunner {
     deadline: DeadlineEpochMs,
     signal?: AbortSignal,
   ): Promise<ProcessObservation>;
+  /**
+   * Stop waiting on everything and start nothing further. Idempotent.
+   *
+   * Every outstanding observation settles `cancelled`, and so does every acknowledgement still in
+   * flight — the id stays valid either way, so a caller still knows what it had registered. An
+   * execution that never reached a shell is `cancelled` too, so an issued identity never becomes
+   * something that waits forever.
+   *
+   * It kills nothing. Children keep running and keep writing to the working tree, which SPEC R13
+   * requires callers to assume, and a result one of them already produced is still replayed.
+   */
+  shutdown(): Promise<void>;
 }
 
 export function createGateRunner(options: GateRunnerOptions = {}): GateRunner {
@@ -110,13 +160,23 @@ export function createGateRunner(options: GateRunnerOptions = {}): GateRunner {
   const now = options.now ?? Date.now;
   const executions = new Map<string, Execution>();
   let nextId = 0;
+  let closed = false;
 
   return {
-    start(spec: ProcessSpec): ProcessLaunch {
+    start(spec: ProcessSpec, deadline: DeadlineEpochMs, signal?: AbortSignal): ProcessLaunch {
       const executionId = `gate-${++nextId}` as ExecutionId;
-      let announceStart: (outcome: SubmissionOutcome) => void = () => undefined;
-      const started = new Promise<SubmissionOutcome>((resolve) => (announceStart = resolve));
-      const execution: Execution = { executionId, waiters: new Set() };
+      let settleStart: (outcome: SubmissionOutcome) => void = () => undefined;
+      const started = new Promise<SubmissionOutcome>((resolve) => (settleStart = resolve));
+      let disarmAck: () => void = () => undefined;
+      let acknowledged = false;
+      const acknowledge = (outcome: SubmissionOutcome): void => {
+        if (acknowledged) return; // told once: a late `spawn` cannot undo a cancellation
+        acknowledged = true;
+        disarmAck();
+        signal?.removeEventListener('abort', onAbort);
+        settleStart(outcome);
+      };
+      const execution: Execution = { executionId, waiters: new Set(), acknowledge };
       executions.set(executionId, execution);
 
       const publish = (observation: ProcessObservation): void => {
@@ -126,15 +186,39 @@ export function createGateRunner(options: GateRunnerOptions = {}): GateRunner {
         // being iterated. Everyone waiting at this moment is entitled to this result.
         const waiting = [...execution.waiters];
         execution.waiters.clear();
-        for (const waiter of waiting) waiter(observation);
+        for (const waiter of waiting) waiter.deliver(observation);
       };
 
       const failedToStart = (detail: string): void => {
-        announceStart({ kind: 'failed', detail });
+        acknowledge({ kind: 'failed', detail });
         publish({ kind: 'unrecoverable', executionId, reason: 'spawn_failed', detail });
       };
 
+      /** Nothing was handed to a shell and nothing will be, so the identity settles here. */
+      const neverDispatched = (): void => {
+        acknowledge({ kind: 'cancelled' });
+        publish({ kind: 'cancelled', executionId });
+      };
+
+      let dispatched = false;
+      function onAbort(): void {
+        // The signal bounds the submission, not the command: a child already started is left alone
+        // and keeps being collected, and only a launch that never reached a shell is settled.
+        if (dispatched) return acknowledge({ kind: 'cancelled' });
+        neverDispatched();
+      }
+      signal?.addEventListener('abort', onAbort);
+
       const dispatch = (): void => {
+        // Re-checked here rather than in `start`: this runs a microtask later, and the caller may
+        // have aborted, the runtime may have shut down or the deadline may have passed in between.
+        // One check covers both moments; two copies of it would only drift apart.
+        if (closed || signal?.aborted === true) return neverDispatched();
+        if (deadline - now() <= 0)
+          return failedToStart(
+            'the deadline passed before dispatch; no shell was started and nothing ran',
+          );
+
         let output = '';
         let bytes = 0;
         let overflowed = false;
@@ -153,6 +237,15 @@ export function createGateRunner(options: GateRunnerOptions = {}): GateRunner {
         } catch (cause) {
           return failedToStart((cause as Error).message);
         }
+        dispatched = true;
+        // From here a shell may be running, so the deadline can no longer claim that nothing did.
+        disarmAck = armDeadline(deadline, now, () =>
+          acknowledge({
+            kind: 'unconfirmed',
+            detail:
+              'the deadline passed before the launch was acknowledged; a shell may be running',
+          }),
+        );
         let spawned = false;
 
         const collect = (stream: 'stdout' | 'stderr') => (chunk: Buffer) => {
@@ -179,7 +272,19 @@ export function createGateRunner(options: GateRunnerOptions = {}): GateRunner {
 
         child.once('spawn', () => {
           spawned = true;
-          announceStart({ kind: 'accepted' });
+          // Against the clock, not the timer: an overdue callback must not permit a late `accepted`.
+          acknowledge(
+            now() >= deadline
+              ? {
+                  kind: 'unconfirmed',
+                  // *Acknowledged* late, which is all that is established. A child can write its
+                  // first line well before the deadline while its parent is slow to process the
+                  // `spawn` event, so nothing here may claim when the shell itself started.
+                  detail:
+                    'the launch was acknowledged only after the deadline; a shell may be running',
+                }
+              : { kind: 'accepted' },
+          );
         });
         child.once('error', (error: Error) => {
           // Before `spawn`, this is the shell failing to start, so nothing ran. A missing *inner*
@@ -222,6 +327,9 @@ export function createGateRunner(options: GateRunnerOptions = {}): GateRunner {
         return Promise.resolve({ kind: 'unrecoverable', executionId, reason: 'unknown_execution' });
       if (signal?.aborted === true) return Promise.resolve({ kind: 'cancelled', executionId });
       if (execution.result !== undefined) return Promise.resolve(execution.result);
+      // A shut-down runtime is not waiting for anything, so an execution that has not ended is
+      // cancelled rather than timed out, whatever the caller's deadline says.
+      if (closed) return Promise.resolve({ kind: 'cancelled', executionId });
       if (deadline - now() <= 0) return Promise.resolve({ kind: 'timed_out', executionId });
 
       return new Promise<ProcessObservation>((resolve) => {
@@ -236,11 +344,14 @@ export function createGateRunner(options: GateRunnerOptions = {}): GateRunner {
           resolve(observation);
         };
 
-        const waiter = (result: ProcessObservation): void =>
-          // Checked against the clock rather than trusting the timer: an overdue callback may not
-          // have run yet, and a waiter whose budget is spent must not be handed a late success.
-          // The execution keeps its result regardless, so a later observation still replays it.
-          finish(now() >= deadline ? { kind: 'timed_out', executionId } : result);
+        const waiter: Waiter = {
+          deliver: (result) =>
+            // Checked against the clock rather than trusting the timer: an overdue callback may not
+            // have run yet, and a waiter whose budget is spent must not be handed a late success.
+            // The execution keeps its result regardless, so a later observation still replays it.
+            finish(now() >= deadline ? { kind: 'timed_out', executionId } : result),
+          cancel: () => finish({ kind: 'cancelled', executionId }),
+        };
         execution.waiters.add(waiter);
         teardown.push(() => execution.waiters.delete(waiter));
 
@@ -254,6 +365,20 @@ export function createGateRunner(options: GateRunnerOptions = {}): GateRunner {
         // installed above rather than expiring before the rest of it exists.
         teardown.push(armDeadline(deadline, now, () => finish({ kind: 'timed_out', executionId })));
       });
+    },
+
+    shutdown(): Promise<void> {
+      if (closed) return Promise.resolve(); // idempotent: the second call has nothing left to do
+      closed = true;
+      for (const execution of executions.values()) {
+        // Acknowledgements first, so a caller still holding `started` is released; a launch that
+        // already reached a shell is left running and goes on being collected.
+        execution.acknowledge({ kind: 'cancelled' });
+        const waiting = [...execution.waiters];
+        execution.waiters.clear();
+        for (const waiter of waiting) waiter.cancel();
+      }
+      return Promise.resolve();
     },
   };
 }
