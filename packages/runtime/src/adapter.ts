@@ -181,6 +181,20 @@ export type ProcessObservation =
       readonly kind: 'unrecoverable';
       readonly executionId: ExecutionId;
       readonly reason: 'unknown_execution' | 'state_lost';
+    }
+  /**
+   * The execution ended in a way that produced no exit status, so none is invented.
+   *
+   * `spawn_failed` means nothing ran at all; `signal_terminated` means it ran and was killed, with
+   * the signal named in `detail`; `output_limit_exceeded` means its output outgrew what this
+   * runtime will hold, so the result cannot be reported in full and is not reported in part. All
+   * three carry a diagnostic `detail`, because the reason alone does not say enough to act on.
+   */
+  | {
+      readonly kind: 'unrecoverable';
+      readonly executionId: ExecutionId;
+      readonly reason: 'spawn_failed' | 'signal_terminated' | 'output_limit_exceeded';
+      readonly detail: string;
     };
 
 /**
@@ -208,6 +222,11 @@ export type AgentOutput =
 export type SubmissionOutcome =
   | { readonly kind: 'accepted' }
   | { readonly kind: 'unconfirmed'; readonly detail: string }
+  /**
+   * Dispatch definitely did not start: nothing ran, and `detail` says why. Distinct from
+   * `unconfirmed`, where delivery is unknown — here there is nothing to double-submit.
+   */
+  | { readonly kind: 'failed'; readonly detail: string }
   | { readonly kind: 'cancelled' };
 
 /**
