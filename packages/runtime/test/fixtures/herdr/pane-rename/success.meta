@@ -1,0 +1,5 @@
+command: herdr --session pipeline_11b pane rename w2:p1 reviewer
+exit: 0
+elapsed_ms: 22
+herdr: 0.9.0
+session: pipeline_11b (isolated headless server, no other agents)

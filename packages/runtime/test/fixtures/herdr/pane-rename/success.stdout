@@ -1,0 +1,1 @@
+{"id":"cli:pane:rename","result":{"pane":{"agent_status":"unknown","cwd":"/private/tmp","focused":false,"foreground_cwd":"/private/tmp","label":"reviewer","pane_id":"w2:p1","revision":0,"scroll":{"max_offset_from_bottom":0,"offset_from_bottom":0,"viewport_rows":40},"tab_id":"w2:t1","terminal_id":"term_65b7a19568a1e2","workspace_id":"w2"},"type":"pane_info"}}

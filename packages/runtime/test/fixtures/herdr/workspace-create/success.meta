@@ -1,0 +1,5 @@
+command: herdr --session pipeline_11b workspace create --cwd /tmp --label pipeline-run
+exit: 0
+elapsed_ms: 40
+herdr: 0.9.0
+session: pipeline_11b (isolated headless server, no other agents)
