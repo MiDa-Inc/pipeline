@@ -205,6 +205,40 @@ describe('cancellation and shutdown', () => {
     expect(live).toBe(0);
   });
 
+  it('still hands back a result it holds after shutdown, and cancels one it does not', async () => {
+    // What shutdown ends is waiting, not memory. Withholding a result already collected would make
+    // a resumed run rerun a gate it has already run, which SPEC R12 exists to prevent.
+    const r = make([ran('test_gate', 0, 'collected\n')]);
+    const finished = r.startProcess(gate('test_gate'), deadline());
+    await expect(r.observeProcess(finished.executionId, deadline())).resolves.toMatchObject({
+      kind: 'completed',
+      output: 'collected\n',
+    });
+    const unfinished = r.startProcess(gate('lint_gate'), deadline());
+    await r.shutdown();
+
+    expect(await r.observeProcess(finished.executionId, deadline())).toMatchObject({
+      kind: 'completed',
+      exitStatus: 0,
+      output: 'collected\n',
+    });
+    // and one that never produced a result is cancelled, because no new wait is installed for it
+    expect(await r.observeProcess(unfinished.executionId, deadline())).toEqual({
+      kind: 'cancelled',
+      executionId: unfinished.executionId,
+    });
+    // an identity this runtime never issued is still decided first, shut down or not, and an
+    // aborted caller is answered before the retained result: it asked to stop, not to collect
+    expect(await r.observeProcess('nope' as ExecutionId, deadline())).toMatchObject({
+      kind: 'unrecoverable',
+      reason: 'unknown_execution',
+    });
+    expect(await r.observeProcess(finished.executionId, deadline(), AbortSignal.abort())).toEqual({
+      kind: 'cancelled',
+      executionId: finished.executionId,
+    });
+  });
+
   it('does not let a launch cancelled before dispatch occupy the gate node', async () => {
     const r = make([ran('test_gate', 0, 'for the live run\n')]);
     const c = new AbortController();

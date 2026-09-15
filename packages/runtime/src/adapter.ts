@@ -332,6 +332,11 @@ export interface RuntimeAdapter {
    * same `completed` result, with the same exit status and output, for as long as the runtime holds
    * it. That is what lets a paused run recover a gate result on resume without rerunning the gate
    * (SPEC R12). Once the result is no longer held, the answer is `unrecoverable`, never a timeout.
+   *
+   * After {@link shutdown} a result the runtime still holds is replayed as usual — shutdown ends
+   * waiting, not memory. An execution that has not ended is `cancelled`, whatever `deadline` says,
+   * because no new wait is installed for it; a caller that wants a result arriving later looks
+   * again rather than waiting here.
    */
   observeProcess(
     executionId: ExecutionId,
@@ -350,7 +355,11 @@ export interface RuntimeAdapter {
    * mean the prompt failed to arrive.
    *
    * It does **not** terminate agents or commands: they keep running and may keep writing to the
-   * working tree, which SPEC R13 requires callers to assume.
+   * working tree, which SPEC R13 requires callers to assume. Panes and workspaces already created
+   * are left in place too; only the adapter's own clients are released.
+   *
+   * Afterwards {@link createLayout} is refused outright rather than creating something nothing will
+   * own, and {@link startProcess} starts nothing.
    */
   shutdown(): Promise<void>;
 }

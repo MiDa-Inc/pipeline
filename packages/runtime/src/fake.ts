@@ -637,12 +637,17 @@ export function createFakeRuntime(config: FakeRuntimeConfig): FakeAgentRuntime {
           reason: 'unknown_execution',
         });
       }
-      if (closed || signal?.aborted || execution.undispatched)
+      if (signal?.aborted)
         return Promise.resolve<ProcessObservation>({ kind: 'cancelled', executionId });
       // Retained and replayed, so a paused run recovers a gate result without rerunning the gate.
+      // Ahead of `closed` deliberately: what shutdown ends is waiting, not memory. A caller after
+      // shutdown can still collect a result this runtime is holding — it just cannot install a new
+      // wait for one that has not arrived, which is the case below.
       const retained = execution.result;
       if (retained !== undefined)
         return Promise.resolve<ProcessObservation>({ kind: 'completed', executionId, ...retained });
+      if (closed || execution.undispatched)
+        return Promise.resolve<ProcessObservation>({ kind: 'cancelled', executionId });
       return new Promise<ProcessObservation>((resolve) => {
         let done = false;
         const onAbort = () => {
