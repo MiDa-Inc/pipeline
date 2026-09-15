@@ -241,14 +241,24 @@ describe('ends that produce no exit status', () => {
     await expect(observeAgain()).resolves.toEqual(observed); // retained, not recomputed
   });
 
-  it('names the signal that ended a gate, and invents no exit status', async () => {
+  it('names the signal that ended the gate itself, and invents no exit status', async () => {
+    // `exec` so the shell *becomes* the node process. Without it the shell forks, survives the
+    // signal and reports a numeric status of its own — a different fact, covered just below.
     const { started, observed } = await run(
-      script('killed', 'process.stdout.write("started\\n"); process.kill(process.pid, "SIGKILL");'),
+      `exec ${script('killed', 'process.stdout.write("started\\n"); process.kill(process.pid, "SIGKILL");')}`,
     );
     expect(started).toEqual({ kind: 'accepted' }); // it ran; it just did not finish
     expect(observed).toMatchObject({ kind: 'unrecoverable', reason: 'signal_terminated' });
     expect((observed as { detail: string }).detail).toContain('SIGKILL');
     expect(observed).not.toHaveProperty('exitStatus');
+  });
+
+  it('keeps a numeric status when the shell outlives a signalled child', async () => {
+    // the shell waits for the killed child and exits 128+9 itself: a real status, so a real result
+    const { observed } = await run(
+      `${script('killed-child', 'process.kill(process.pid, "SIGKILL");')}; exit $?`,
+    );
+    expect(completed(observed).exitStatus).toBe(137);
   });
 
   it('refuses a result it could not hold whole, even when the gate then exits zero', async () => {
