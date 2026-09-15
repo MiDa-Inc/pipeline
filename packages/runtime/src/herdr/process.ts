@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
 
 import type {
+  DeadlineEpochMs,
   ExecutionId,
   ProcessLaunch,
   ProcessObservation,
@@ -16,9 +17,14 @@ import type {
  * no exit status anywhere — see the departure recorded in PLAN.md step 11. SPEC R7 routes on a real
  * exit status, so gates are spawned directly.
  *
- * Nothing here is exported from the package yet: a complete `RuntimeAdapter` needs the observation
- * and shutdown behaviour that slice 11c-2 adds, and half of one with ignored deadlines would be
- * worse than none.
+ * Nothing here is exported from the package yet: a complete `RuntimeAdapter` still needs the
+ * shutdown behaviour that slice 11c-2b adds, and half of one would be worse than none.
+ *
+ * **Waiting is the caller's, the result is the execution's.** An execution ends once and keeps that
+ * ending; observers come and go around it. A deadline or an abort ends only the waiting it was given
+ * to — the child keeps running, its eventual result is still recorded, and every later observer
+ * replays it unchanged. So one observer's timeout cannot deny another observer the real answer, and
+ * cancelling one cannot disturb the rest.
  *
  * **Output.** `ProcessSpec.command` is a shell command string, so it runs through a shell and keeps
  * its quoting and pipelines. stdout and stderr are decoded **separately** — each stream has its own
@@ -30,6 +36,30 @@ import type {
 /** Bytes of combined stdout and stderr retained before the result is refused rather than truncated. */
 export const DEFAULT_OUTPUT_LIMIT = 8 * 1024 * 1024;
 
+/** `setTimeout` treats anything larger as zero, so long waits are reached in steps. */
+const MAX_TIMEOUT = 2_147_483_647;
+
+/**
+ * Call `expire` when `deadline` arrives, and hand back the way to stop waiting for it.
+ *
+ * A distant deadline is reached in steps: `setTimeout` fires immediately for anything past
+ * 2^31-1 ms, so scheduling one hop for a deadline weeks away would expire it at once.
+ */
+const armDeadline = (
+  deadline: DeadlineEpochMs,
+  now: () => number,
+  expire: () => void,
+): (() => void) => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const step = (): void => {
+    const left = deadline - now();
+    if (left <= 0) return expire();
+    timer = setTimeout(step, Math.min(left, MAX_TIMEOUT));
+  };
+  step();
+  return () => clearTimeout(timer);
+};
+
 export interface GateRunnerOptions {
   /** The shell that interprets `ProcessSpec.command`. */
   readonly shell?: string;
@@ -37,25 +67,47 @@ export interface GateRunnerOptions {
   readonly outputLimit?: number;
   /** How a child is started. Injectable so tests can observe *when* dispatch happens. */
   readonly spawn?: typeof spawn;
+  /**
+   * The clock deadlines are measured against. Injectable for the same reason `spawn` is: a timer
+   * callback that runs after its due time is a real hazard and is otherwise unobservable.
+   */
+  readonly now?: () => number;
 }
 
 interface Execution {
   readonly executionId: ExecutionId;
   /** Set once the process ended, in whatever way. Retained and replayed unchanged. */
-  settled: Promise<ProcessObservation>;
+  result?: ProcessObservation;
+  /** Observers waiting on this execution. Each settles on its own terms; none of them owns it. */
+  readonly waiters: Set<(result: ProcessObservation) => void>;
 }
 
 export interface GateRunner {
   /** Synchronous and identity-first: the id exists before any I/O, as the adapter requires. */
   start(spec: ProcessSpec): ProcessLaunch;
-  /** Waits for the execution to end. Deadlines and cancellation arrive in 11c-2. */
-  observe(executionId: ExecutionId): Promise<ProcessObservation>;
+  /**
+   * Waits for the execution to end, for as long as `deadline` and `signal` allow.
+   *
+   * The order the answers are decided in, which is the whole contract:
+   *
+   * 1. an identity this runtime never issued cannot be observed at all;
+   * 2. a caller that has already aborted is told so, and nothing is started for it;
+   * 3. an execution that already ended replays its result at once — a spent deadline does not hide
+   *    an answer the runtime is holding, and no waiting is set up to be torn down;
+   * 4. only then does a deadline matter: a spent one is `timed_out`, a live one permits waiting.
+   */
+  observe(
+    executionId: ExecutionId,
+    deadline: DeadlineEpochMs,
+    signal?: AbortSignal,
+  ): Promise<ProcessObservation>;
 }
 
 export function createGateRunner(options: GateRunnerOptions = {}): GateRunner {
   const shell = options.shell ?? '/bin/sh';
   const start = options.spawn ?? spawn;
   const limit = options.outputLimit ?? DEFAULT_OUTPUT_LIMIT;
+  const now = options.now ?? Date.now;
   const executions = new Map<string, Execution>();
   let nextId = 0;
 
@@ -64,9 +116,18 @@ export function createGateRunner(options: GateRunnerOptions = {}): GateRunner {
       const executionId = `gate-${++nextId}` as ExecutionId;
       let announceStart: (outcome: SubmissionOutcome) => void = () => undefined;
       const started = new Promise<SubmissionOutcome>((resolve) => (announceStart = resolve));
-      let publish: (observation: ProcessObservation) => void = () => undefined;
-      const settled = new Promise<ProcessObservation>((resolve) => (publish = resolve));
-      executions.set(executionId, { executionId, settled });
+      const execution: Execution = { executionId, waiters: new Set() };
+      executions.set(executionId, execution);
+
+      const publish = (observation: ProcessObservation): void => {
+        if (execution.result !== undefined) return; // the first ending is the ending
+        execution.result = observation;
+        // Copied before delivery: a waiter settles synchronously and would otherwise mutate the set
+        // being iterated. Everyone waiting at this moment is entitled to this result.
+        const waiting = [...execution.waiters];
+        execution.waiters.clear();
+        for (const waiter of waiting) waiter(observation);
+      };
 
       const failedToStart = (detail: string): void => {
         announceStart({ kind: 'failed', detail });
@@ -128,8 +189,8 @@ export function createGateRunner(options: GateRunnerOptions = {}): GateRunner {
 
         // `close` rather than `exit`: it waits for the streams themselves to end, so output written
         // by anything the gate left running is still captured. The consequence is that a gate which
-        // backgrounds a long-lived process keeps its execution open — bounded by the deadline that
-        // slice 11c-2 adds, and by the output cap above.
+        // backgrounds a long-lived process keeps its execution open; an observer's deadline bounds
+        // that observer's waiting, and the output cap above bounds what is held.
         child.once('close', (code: number | null, signal: NodeJS.Signals | null) => {
           if (!spawned || overflowed) return; // a refusal already published stands
           output += decoders.stdout.end() + decoders.stderr.end();
@@ -150,11 +211,49 @@ export function createGateRunner(options: GateRunnerOptions = {}): GateRunner {
       return { executionId, started };
     },
 
-    observe(executionId: ExecutionId): Promise<ProcessObservation> {
+    observe(
+      executionId: ExecutionId,
+      deadline: DeadlineEpochMs,
+      signal?: AbortSignal,
+    ): Promise<ProcessObservation> {
       const execution = executions.get(executionId);
+      // The precedence documented on GateRunner.observe, in that order.
       if (execution === undefined)
         return Promise.resolve({ kind: 'unrecoverable', executionId, reason: 'unknown_execution' });
-      return execution.settled;
+      if (signal?.aborted === true) return Promise.resolve({ kind: 'cancelled', executionId });
+      if (execution.result !== undefined) return Promise.resolve(execution.result);
+      if (deadline - now() <= 0) return Promise.resolve({ kind: 'timed_out', executionId });
+
+      return new Promise<ProcessObservation>((resolve) => {
+        // Every ending runs the same teardown, so no waiter, timer or abort listener outlives the
+        // observation that installed it, whichever way that observation ended.
+        const teardown: Array<() => void> = [];
+        let ended = false;
+        const finish = (observation: ProcessObservation): void => {
+          if (ended) return;
+          ended = true;
+          for (const undo of teardown) undo();
+          resolve(observation);
+        };
+
+        const waiter = (result: ProcessObservation): void =>
+          // Checked against the clock rather than trusting the timer: an overdue callback may not
+          // have run yet, and a waiter whose budget is spent must not be handed a late success.
+          // The execution keeps its result regardless, so a later observation still replays it.
+          finish(now() >= deadline ? { kind: 'timed_out', executionId } : result);
+        execution.waiters.add(waiter);
+        teardown.push(() => execution.waiters.delete(waiter));
+
+        if (signal !== undefined) {
+          const onAbort = (): void => finish({ kind: 'cancelled', executionId });
+          signal.addEventListener('abort', onAbort);
+          teardown.push(() => signal.removeEventListener('abort', onAbort));
+        }
+
+        // Armed last, so that a deadline the clock has passed in the meantime tears down everything
+        // installed above rather than expiring before the rest of it exists.
+        teardown.push(armDeadline(deadline, now, () => finish({ kind: 'timed_out', executionId })));
+      });
     },
   };
 }
